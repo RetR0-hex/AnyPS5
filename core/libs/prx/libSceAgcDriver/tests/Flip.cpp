@@ -165,6 +165,33 @@ void testFlipAndBoundary() {
     AgcDriverUnregisterVideoOutput_nid_postfix(7, replacement);
 }
 
+void testFramesInFlight() {
+    auto output = std::make_shared<Output>();
+    AgcDriverRegisterVideoOutput_nid_postfix(7, output);
+    {
+        std::lock_guard lock(output->state->mutex);
+        output->state->block = true;
+    }
+    FlipRelease release(output->state);
+    submitFlip();
+    {
+        std::unique_lock lock(output->state->mutex);
+        check(output->state->changed.wait_for(lock, std::chrono::seconds(5), [&] { return output->state->entered; }), "worker did not reach the first flip");
+    }
+    auto second = std::async(std::launch::async, [] { submitFlip(); });
+    check(second.wait_for(std::chrono::seconds(5)) == std::future_status::ready, "a second frame in flight was refused");
+    second.get();
+    auto third = std::async(std::launch::async, [] { submitFlip(); });
+    check(third.wait_for(std::chrono::milliseconds(300)) == std::future_status::timeout, "a third frame was accepted while the first was still on the GPU");
+    check(output->state->ready == 0, "blocked flip completed before release");
+    release.Release();
+    check(third.wait_for(std::chrono::seconds(5)) == std::future_status::ready, "the third frame stayed blocked after the first completed");
+    third.get();
+    AgcDriverWaitIdle_nid_postfix();
+    check(output->state->ready == 3 && output->state->failed == 0, "frames were lost while waiting for the GPU");
+    AgcDriverUnregisterVideoOutput_nid_postfix(7, output);
+}
+
 void testFailure() {
     auto output = std::make_shared<Output>();
     output->state->fail = true;
@@ -201,7 +228,7 @@ void testReset(bool compute) {
 int main(int argc, char** argv) {
     try {
         if (argc == 2) testReset(std::string(argv[1]) == "compute");
-        else { testFlipAndBoundary(); testFailure(); }
+        else { testFlipAndBoundary(); testFramesInFlight(); testFailure(); }
         const auto shutdown = expectFailure([] { LibcRunShutdown_nid_postfix(); });
         check(shutdown.find(argc == 2 ? (std::string(argv[1]) == "compute" ? "registered" : "required shader register") : "intentional flip failure") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC flip and suspend tests passed");

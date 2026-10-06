@@ -100,6 +100,24 @@ void Driver::waitForFlipRoom(const Submission& submission) {
     }
 }
 
+void Driver::waitForFrameInFlight(std::unique_lock<std::mutex>& lock, const Submission& submission) {
+    static constexpr std::size_t FramesInFlight = 2;
+    bool flips = false;
+    for (std::size_t cursor = 0; cursor < submission.commands.size() && !flips; cursor += Pm4::PacketWords(submission.commands[cursor])) {
+        flips = submission.commands[cursor] == FlipPacketHeader;
+    }
+    if (!flips) return;
+    while (framesInFlight.size() >= FramesInFlight) {
+        const auto oldest = framesInFlight.front();
+        ++idleWaiters;
+        changed.wait(lock, [&] { return failure != nullptr || stopping || completed >= oldest || completedOutOfOrder.contains(oldest); });
+        --idleWaiters;
+        rethrowFailure();
+        checkStopping();
+        if (!framesInFlight.empty() && framesInFlight.front() == oldest) framesInFlight.pop_front();
+    }
+}
+
 void Driver::reserveOutputs(Submission& submission) {
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
         const auto* words = submission.commands.data() + cursor;
@@ -178,13 +196,15 @@ void Driver::Submit(const Packet* packet, std::uint32_t queue) {
     if (trace) std::fprintf(stderr, "[gpu] %.1f submit queue=0x%x dwords=%zu at %p\n", TraceMs(), queue, submission.commands.size(), static_cast<const void*>(descriptor.addr));
     const auto validated = profile ? std::chrono::steady_clock::now() : start;
     {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
         rethrowFailure();
         checkStopping();
+        waitForFrameInFlight(lock, submission);
         require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
         reserveOutputs(submission);
         submission.shaders = shaders;
         submission.serial = accepted + 1;
+        if (!submission.flips.empty()) framesInFlight.push_back(submission.serial);
 
         submission.received = ++eventSerial;
         if (profile) {
