@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <vector>
 
 extern "C" {
@@ -45,11 +46,10 @@ inline void Check(bool value, int line) {
 
 inline constexpr std::uint32_t Grain = 8;
 
-inline std::vector<std::uint64_t> buffers[32];
-inline std::size_t usedBuffers = 0;
+inline std::deque<std::vector<std::uint64_t>> buffers;
 
 inline Ngs2ContextBufferInfo Buffer(const Ngs2ContextBufferInfo& query) {
-    auto& storage = buffers[usedBuffers++];
+    auto& storage = buffers.emplace_back();
     storage.resize(query.host_buffer_size / sizeof(std::uint64_t) + 1);
     Ngs2ContextBufferInfo info{};
     info.host_buffer = storage.data();
