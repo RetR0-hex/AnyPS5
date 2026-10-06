@@ -357,6 +357,52 @@ static void TestPlayParsedPcm() {
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 }
 
+static uintptr_t StereoChain(uintptr_t system) {
+    const auto master = Mastering(system, 2);
+    const auto submixer = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SUBMIXER));
+    Control(submixer, SCE_NGS2_SUBMIXER_VOICE_PARAM_SETUP, Ngs2SubmixerVoiceSetupParam{{}, 2, 0});
+    Patch(submixer, master);
+    Event(submixer, SCE_NGS2_VOICE_EVENT_PLAY);
+    const std::vector<std::int16_t> pcm(Grain, 16384);
+    const auto sampler = Sampler(system, pcm, 0);
+    Patch(sampler, submixer);
+    const float levels[2] = {1.0f, 0.5f};
+    Control(sampler, SCE_NGS2_VOICE_PARAM_MATRIX_LEVELS, Ngs2VoiceMatrixLevelsParam{{}, 0, 2, levels});
+    Control(sampler, SCE_NGS2_VOICE_PARAM_PORT_MATRIX, Ngs2VoicePortMatrixParam{{}, 0, 0});
+    Event(sampler, SCE_NGS2_VOICE_EVENT_PLAY);
+    return master;
+}
+
+static void TestMasteringIntoWiderBuffer() {
+    const auto system = CreateSystem();
+    StereoChain(system);
+    std::vector<float> out(Grain * 8, -1.0f);
+    const Ngs2RenderBufferInfo info{out.data(), out.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, 8};
+    Require(sceNgs2SystemRender(system, &info, 1) == SCE_NGS2_OK);
+    for (std::uint32_t i = 0; i < Grain; i++) {
+        Require(out[i * 8] == 0.5f && out[i * 8 + 1] == 0.25f);
+        for (std::uint32_t channel = 2; channel < 8; channel++) Require(out[i * 8 + channel] == 0.0f);
+    }
+
+    std::vector<std::int16_t> pcm16(Grain * 8, -1);
+    const Ngs2RenderBufferInfo info16{pcm16.data(), pcm16.size() * sizeof(std::int16_t), SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 8};
+    Require(sceNgs2SystemRender(system, &info16, 1) == SCE_NGS2_OK);
+    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
+
+    const auto narrow = CreateSystem();
+    StereoChain(narrow);
+    std::vector<float> mono(Grain, 0.0f);
+    const Ngs2RenderBufferInfo monoInfo{mono.data(), mono.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, 1};
+    bool threw = false;
+    try {
+        sceNgs2SystemRender(narrow, &monoInfo, 1);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    Require(threw);
+    Require(sceNgs2SystemDestroy(narrow, nullptr) == SCE_NGS2_OK);
+}
+
 int main() {
     TestParsePcm();
     TestPlayParsedPcm();
@@ -364,6 +410,7 @@ int main() {
     TestPcmBlockEnd();
     TestPitchAndRepeat();
     TestSubmixerMatrix();
+    TestMasteringIntoWiderBuffer();
     TestSampleRate();
     TestUserData();
     TestLock();
