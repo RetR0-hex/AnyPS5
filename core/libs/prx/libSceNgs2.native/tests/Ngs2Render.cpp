@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 static uintptr_t Sampler(uintptr_t system, const std::vector<std::int16_t>& pcm, std::uint32_t repeats) {
@@ -235,7 +236,67 @@ static void TestAllocator() {
     Require(sceNgs2RackDestroy(master, nullptr) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
 }
 
+static std::vector<std::pair<std::uintptr_t, const void*>> streamEvents;
+static void APS5_VABI OnStream(const Ngs2VoiceCallbackInfo* info) {
+    Require(info->flag == SCE_NGS2_VOICE_CALLBACK_FLAG_BLOCK_END);
+    streamEvents.push_back({info->user_data, info->block_data});
+}
+
+static uintptr_t StreamVoice(uintptr_t system) {
+    const auto master = Mastering(system, 1);
+    const auto voice = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SAMPLER));
+    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP, Ngs2SamplerVoiceSetupParam{{}, {SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 1, 48000, 0, 0, 0}});
+    Patch(voice, master);
+    Control(voice, SCE_NGS2_VOICE_PARAM_CALLBACK, Ngs2VoiceCallbackParam{{}, OnStream, 0, SCE_NGS2_VOICE_CALLBACK_FLAG_BLOCK_END, 0});
+    return voice;
+}
+
+static void TestPcmStreaming() {
+    const std::vector<std::int16_t> first = {100, 200, 300, 400};
+    const std::vector<std::int16_t> second = {500, 600, 700, 800, 900, 1000, 1100, 1200};
+    const auto system = CreateSystem();
+    const auto voice = StreamVoice(system);
+    streamEvents.clear();
+    const Ngs2WaveformBlock head{0, first.size() * sizeof(std::int16_t), 0, 0, 12, 0, 0x11};
+    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, first.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE, 1, &head});
+    Event(voice, SCE_NGS2_VOICE_EVENT_PLAY);
+
+    auto out = RenderI16(system);
+    for (std::size_t i = 0; i < first.size(); i++) Require(out[i] == first[i]);
+    for (std::size_t i = first.size(); i < Grain; i++) Require(out[i] == 0);
+    Require((Flags(voice) & SCE_NGS2_VOICE_STATE_FLAG_PLAYING) != 0);
+    Require(streamEvents.size() == 1 && streamEvents[0].first == 0x11 && streamEvents[0].second == first.data());
+
+    const Ngs2WaveformBlock more{0, second.size() * sizeof(std::int16_t), 0, 0, 0, 0, 0x22};
+    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS,
+            Ngs2SamplerVoiceWaveformBlocksParam{{}, second.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_DATA_ONLY, 1, &more});
+    out = RenderI16(system);
+    for (std::size_t i = 0; i < second.size(); i++) Require(out[i] == second[i]);
+    Require(streamEvents.size() == 2 && streamEvents[1].first == 0x22 && streamEvents[1].second == second.data());
+    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
+
+    const auto strict = CreateSystem();
+    const auto closed = StreamVoice(strict);
+    bool threw = false;
+    try {
+        Control(closed, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, first.data(), 0, 1, &head});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    Require(threw);
+    threw = false;
+    try {
+        Control(closed, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS,
+                Ngs2SamplerVoiceWaveformBlocksParam{{}, second.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_DATA_ONLY, 1, &more});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    Require(threw);
+    Require(sceNgs2SystemDestroy(strict, nullptr) == SCE_NGS2_OK);
+}
+
 int main() {
+    TestPcmStreaming();
     TestErrorsAndInfo();
     TestPcmBlockEnd();
     TestPitchAndRepeat();
