@@ -2,10 +2,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "libatrac9.h"
 #include "prx/libc/include/General.hpp"
@@ -181,6 +184,38 @@ static int ParseAtrac9(const RiffChunks& chunks, Ngs2WaveformInfo& info) {
     return SCE_NGS2_OK;
 }
 
+static bool AppendFromFile(std::ifstream& file, std::uintmax_t& remaining, std::size_t size, std::vector<std::uint8_t>& bytes) {
+    const std::size_t count = static_cast<std::size_t>(std::min<std::uintmax_t>(size, remaining));
+    const std::size_t start = bytes.size();
+    bytes.resize(start + count);
+    file.read(reinterpret_cast<char*>(bytes.data() + start), static_cast<std::streamsize>(count));
+    bytes.resize(start + static_cast<std::size_t>(file.gcount()));
+    remaining -= static_cast<std::uintmax_t>(file.gcount());
+    return count == size && static_cast<std::size_t>(file.gcount()) == size;
+}
+
+static std::vector<std::uint8_t> ReadWaveformHeader(const char* guestPath, std::uint64_t offset) {
+    const std::filesystem::path hostPath = ResolvePath_nid_no_patch(guestPath);
+    std::error_code error;
+    const std::uintmax_t fileSize = std::filesystem::file_size(hostPath, error);
+    std::ifstream file(hostPath, std::ios::binary);
+    if (error || !file) throw std::runtime_error(std::string("NGS2: cannot open waveform file ") + guestPath);
+    std::vector<std::uint8_t> bytes;
+    if (offset >= fileSize) return bytes;
+    file.seekg(static_cast<std::streamoff>(offset));
+    std::uintmax_t remaining = fileSize - offset;
+    if (!AppendFromFile(file, remaining, 12, bytes)) return bytes;
+    while (AppendFromFile(file, remaining, 8, bytes)) {
+        const std::uint8_t* chunk = bytes.data() + bytes.size() - 8;
+        if (std::memcmp(chunk, "data", 4) == 0) break;
+        const std::uint32_t chunkSize = ReadLe32(chunk + 4);
+        const std::uint64_t padded = static_cast<std::uint64_t>(chunkSize) + (chunkSize & 1);
+        if (padded > remaining) break;
+        if (!AppendFromFile(file, remaining, static_cast<std::size_t>(padded), bytes)) break;
+    }
+    return bytes;
+}
+
 #pragma GCC visibility push(default)
 
 extern "C" {
@@ -198,6 +233,14 @@ int APS5_VABI sceNgs2ParseWaveformData(const void* data, size_t data_size, Ngs2W
         return ParseAtrac9(chunks, *info);
     }
     throw std::runtime_error("NGS2: parsing waveform format tag " + Ngs2Hex(tag) + " is not implemented");
+}
+
+int APS5_VABI sceNgs2ParseWaveformFile(const char* path, uint64_t offset, Ngs2WaveformInfo* info) {
+    if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    *info = {};
+    if (path == nullptr) throw std::runtime_error("NGS2: sceNgs2ParseWaveformFile without a path");
+    const std::vector<std::uint8_t> header = ReadWaveformHeader(path, offset);
+    return sceNgs2ParseWaveformData(header.data(), header.size(), info);
 }
 
 int APS5_VABI sceNgs2CalcWaveformBlock(const Ngs2WaveformFormat* format, uint32_t sample_pos, uint32_t num_samples, Ngs2WaveformBlock* block) {

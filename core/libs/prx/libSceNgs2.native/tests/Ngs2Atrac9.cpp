@@ -2,8 +2,11 @@
 
 #include "libatrac9.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -176,6 +179,43 @@ static void TestParse() {
     Require(sceNgs2ParseWaveformData(wrongRate.data(), wrongRate.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
 }
 
+static void WriteFile(const char* path, const std::vector<std::uint8_t>& bytes) {
+    std::filesystem::create_directories("app0");
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    Require(static_cast<bool>(file));
+}
+
+static void TestParseFile() {
+    const auto wave = At9File(48000);
+    Ngs2WaveformInfo expected{};
+    Require(sceNgs2ParseWaveformData(wave.data(), wave.size(), &expected) == SCE_NGS2_OK);
+
+    std::vector<std::uint8_t> packed(37 + wave.size(), 0xab);
+    std::copy(wave.begin(), wave.end(), packed.begin() + 37);
+    WriteFile("app0/ngs2_wave.bin", packed);
+
+    Ngs2WaveformInfo info{};
+    Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 37, nullptr) == SCE_NGS2_ERROR_INVALID_OUT_ADDRESS);
+    Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 37, &info) == SCE_NGS2_OK);
+    Require(std::memcmp(&info, &expected, sizeof(info)) == 0);
+    Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 0, &info) == SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT);
+    Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", packed.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA);
+
+    auto truncated = wave;
+    truncated.resize(40);
+    WriteFile("app0/ngs2_truncated.bin", truncated);
+    Require(sceNgs2ParseWaveformFile("/app0/ngs2_truncated.bin", 0, &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA);
+
+    bool threw = false;
+    try {
+        sceNgs2ParseWaveformFile("/app0/ngs2_missing.bin", 0, &info);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    Require(threw);
+}
+
 static void TestCalcBlock() {
     const Ngs2WaveformFormat format{SCE_NGS2_WAVEFORM_TYPE_ATRAC9, 1, 48000, Config, 0, 0};
     Ngs2WaveformBlock block{};
@@ -235,6 +275,7 @@ int main() {
     TestSkipAndBlockEnd(reference);
     TestRepeatAndState(reference);
     TestParse();
+    TestParseFile();
     TestCalcBlock();
     TestCorruptSuperframeAtPageEnd();
     return 0;
