@@ -24,12 +24,20 @@ enum class Ngs2PlayState : std::uint32_t {
     Stopped = SCE_NGS2_VOICE_STATE_FLAG_INUSE | SCE_NGS2_VOICE_STATE_FLAG_PLAYING | SCE_NGS2_VOICE_STATE_FLAG_STOPPED,
 };
 
+struct Ngs2Segment {
+    const std::uint8_t* data;
+    std::size_t bytes;
+    std::uintptr_t userData;
+};
+
 struct Ngs2Block {
     const std::uint8_t* data;
     Ngs2WaveformBlock info;
     std::uint32_t cursor = 0;
     std::uint32_t numRepeated = 0;
     std::size_t dataCursor = 0;
+    std::deque<Ngs2Segment> segments;
+    std::size_t segmentStart = 0;
 };
 
 struct Ngs2Atrac9DecoderDeleter {
@@ -153,6 +161,7 @@ void Ngs2SetupAtrac9(Ngs2Voice& voice, const Ngs2WaveformFormat& format);
 std::size_t Ngs2Atrac9BlockBytes(const Ngs2Voice& voice, const Ngs2WaveformBlock& block);
 void Ngs2RestartAtrac9(Ngs2Voice& voice);
 const float* Ngs2Atrac9Frame(Ngs2Voice& voice, Ngs2Block& block, std::uint32_t frame);
+const std::uint8_t* Ngs2PcmPosition(const Ngs2Voice& voice, const Ngs2Block& block, std::uint32_t frame, std::size_t bytes);
 void Ngs2CheckCustomRack(const Ngs2CustomRackOption& option);
 void Ngs2SetupUserFx(Ngs2Rack& rack, const Ngs2CustomRackOption& option);
 void Ngs2CleanupUserFx(Ngs2Rack& rack);
