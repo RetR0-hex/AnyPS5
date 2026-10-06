@@ -69,6 +69,7 @@ private:
     static void copyCommands(Submission& submission, const std::uint32_t* guest, std::size_t words);
     static bool copySegment(Submission& submission, const std::uint32_t* guest, std::size_t words, std::size_t& budget);
     void waitForFlipRoom(const Submission& submission);
+    void waitForFrameInFlight(std::unique_lock<std::mutex>& lock, const Submission& submission);
     void reserveOutputs(Submission& submission);
     void executeRewindTail(const Submission& stalled);
     void enqueue(Submission submission);
@@ -292,6 +293,7 @@ private:
     bool resetGraphics = false;
 
     std::uint32_t idleWaiters = 0;
+    std::deque<std::uint64_t> framesInFlight;
     std::uint64_t queue0Executing = 0;
     std::atomic<std::uint32_t> orderHolders{0};
     std::atomic<std::uint32_t> runningWorkers{0};
