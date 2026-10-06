@@ -8,9 +8,9 @@ Includes a [relinker](core/relinker) that converts executable to the target syst
 
 ## Status
 
-[![libraries](https://boykopovar.github.io/AnyPS5/badge-libraries.svg)](https://boykopovar.github.io/AnyPS5/) [![shaders](https://boykopovar.github.io/AnyPS5/badge-shaders.svg)](https://boykopovar.github.io/AnyPS5/)
+[![libraries](https://retr0-hex.github.io/AnyPS5/badge-libraries.svg)](https://retr0-hex.github.io/AnyPS5/) [![shaders](https://retr0-hex.github.io/AnyPS5/badge-shaders.svg)](https://retr0-hex.github.io/AnyPS5/)
 
-[![progress map](https://boykopovar.github.io/AnyPS5/progress.svg)](https://boykopovar.github.io/AnyPS5/)
+[![progress map](https://retr0-hex.github.io/AnyPS5/progress.svg)](https://retr0-hex.github.io/AnyPS5/)
 
 <sub>* System libraries: percentage of the functions known to the project so far (declared in [core/libs/prx](core/libs/prx)), not of every PS5 system function. The total grows as more functions are declared.</sub>
 
