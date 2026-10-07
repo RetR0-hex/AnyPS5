@@ -13,6 +13,8 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
 int APS5_VABI sceVideoOutIsOutputSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reserved_ptr, uint64_t reserved);
 int APS5_VABI sceVideoOutInitializeOutputOptions(VideoOutOutputOptions* options);
 int APS5_VABI sceVideoOutAllowOutputResolutionWqhdDetection(int handle);
+int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t unknown1, uint64_t unknown2);
+int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle);
 int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate);
 int APS5_VABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom);
 int APS5_VABI sceVideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status);
