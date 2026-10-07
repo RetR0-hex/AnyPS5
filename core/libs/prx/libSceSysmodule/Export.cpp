@@ -26,24 +26,15 @@ const char* findModuleName(const std::uint32_t id) {
 std::mutex gMutex;
 std::unordered_map<std::uint32_t, std::int32_t> gLoadCount;
 
+}
+
+extern "C" int APS5_VABI sceKernelGetModuleInfoForUnwind(std::uint64_t addr, int flags, ModuleInfoForUnwind* info);
+
+namespace {
+
 bool fillModuleInfoForUnwind(std::uint64_t addr, ModuleInfoForUnwind* info) {
 #ifdef _WIN32
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
-        return false;
-    }
-    info->st_size = sizeof(ModuleInfoForUnwind);
-    info->eh_frame_hdr_addr = 0;
-    info->eh_frame_addr = 0;
-    info->eh_frame_size = 0;
-    info->seg0_addr = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
-    info->seg0_size = mbi.RegionSize;
-    char path[4096] = {};
-    DWORD len = GetMappedFileNameA(GetCurrentProcess(), mbi.BaseAddress, path, sizeof(path) - 1);
-    path[len] = '\0';
-    std::strncpy(info->name, path, sizeof(info->name) - 1);
-    info->name[sizeof(info->name) - 1] = '\0';
-    return true;
+    return sceKernelGetModuleInfoForUnwind(addr, 0, info) == 0;
 #else
     std::ifstream maps("/proc/self/maps");
     if (!maps) {
