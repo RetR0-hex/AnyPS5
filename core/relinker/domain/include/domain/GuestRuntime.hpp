@@ -23,6 +23,8 @@ struct GuestRuntime {
     std::uint32_t InitRva = 0;
     std::uint32_t FiniRva = 0;
     bool UsePlatformTlsResolver = true;
+    // Started by sceKernelLoadStartModule with the caller's arguments, not at program start.
+    bool DeferredStart = false;
     std::vector<std::string> Names;
 };
 
