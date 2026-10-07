@@ -76,6 +76,17 @@ int APS5_VABI sceNpEntitlementAccessGetAddcontEntitlementInfo(uint32_t service_l
     return SCE_NP_ENTITLEMENT_ACCESS_ERROR_NOT_FOUND;
 }
 
+// Owned add-ons are the ones listed in anyps5-entitlements.ini. Their content is
+// stored unencrypted here, so the key is all zeros.
+int APS5_VABI sceNpEntitlementAccessGetEntitlementKey(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, NpEntitlementAccessEntitlementKey* key) {
+    NpEntitlementAccessAddcontEntitlementInfo info{};
+    if (!key) return SCE_NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+    const int result = sceNpEntitlementAccessGetAddcontEntitlementInfo(service_label, entitlement_label, &info);
+    if (result != 0) return result;
+    *key = {};
+    return 0;
+}
+
 int APS5_VABI sceNpEntitlementAccessGetAddcontEntitlementInfoList(uint32_t service_label, NpEntitlementAccessAddcontEntitlementInfo* list, uint32_t list_num, uint32_t* hit_num) {
     (void)service_label;
     if (!hit_num || (!list && list_num != 0)) return SCE_NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
