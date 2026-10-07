@@ -80,7 +80,7 @@ int main(const int argc, char* argv[]) {
         );
 
         std::cout << "System: " << (args.toWindows ? "Windows" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
-        std::cout << "sce_module/sce_modules/prx processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
+        std::cout << "sce_module/sce_modules/prx/Media module processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
         for (const auto& name : args.excludedSceModules) std::cout << "Guest module excluded: " << name << '\n';
         auto result = pipeline->Relink(sourceBytes);
         for (const auto& patch : result.Patches) {

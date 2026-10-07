@@ -20,11 +20,16 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     const bool hasSingular = std::filesystem::exists(singular);
     const bool hasPlural = std::filesystem::exists(plural);
     const bool hasPrx = std::filesystem::exists(prx);
+    // Unity keeps the game's own modules here: Modules are needed by the executable, Plugins are loaded at run time.
+    const std::filesystem::path unity[] = {root / "Media" / "Modules", root / "Media" / "Plugins"};
+    const bool hasUnity = std::any_of(std::begin(unity), std::end(unity), [](const auto& path) { return std::filesystem::exists(path); });
     if (hasSingular && hasPlural) throw Domain::RelinkerException("Both sce_module and sce_modules exist beside the input executable");
-    if (!hasSingular && !hasPlural && !hasPrx) throw Domain::RelinkerException("sce_module/sce_modules/prx was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
+    if (!hasSingular && !hasPlural && !hasPrx && !hasUnity) throw Domain::RelinkerException("sce_module/sce_modules/prx was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
     std::vector<std::filesystem::path> directories;
     if (hasSingular || hasPlural) directories.push_back(hasSingular ? singular : plural);
     if (hasPrx) directories.push_back(prx);
+    for (const auto& path : unity) if (std::filesystem::exists(path)) directories.push_back(path);
+    const auto moduleDirectory = [&](const std::filesystem::path& source) { return source.parent_path().lexically_relative(root).generic_string(); };
     std::vector<std::filesystem::path> paths;
     std::set<std::string> unmatchedExclusions = excludedModules;
     for (const auto& directory : directories) {
@@ -193,7 +198,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         Io::AppendU64(dynamic.DynamicSegmentData, dynamic.DynStrData.size());
         Io::AppendString(dynamic.DynStrData, name);
     };
-    for (const auto index : order) if (!windows) addNeeded("$ORIGIN/app0/" + images[index].SourcePath.parent_path().filename().generic_string() + "/" + images[index].OutputName);
+    for (const auto index : order) if (!windows) addNeeded("$ORIGIN/app0/" + moduleDirectory(images[index].SourcePath) + "/" + images[index].OutputName);
     for (const auto& name : hostLibraries) addNeeded(name);
     std::string guestRunPath = runPath;
     if (!windows) {
@@ -204,7 +209,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     std::vector<GuestArtifact> artifacts;
     for (const auto index : order) {
         const auto& image = images[index];
-        const auto relativeDirectory = "app0/" + image.SourcePath.parent_path().filename().generic_string();
+        const auto relativeDirectory = "app0/" + moduleDirectory(image.SourcePath);
         const auto destination = std::filesystem::absolute(outputPath).parent_path() / relativeDirectory;
         const auto target = destination / image.OutputName;
         if (target.lexically_normal() == std::filesystem::absolute(outputPath).lexically_normal()) throw Domain::RelinkerException("Guest output collides with the executable output");

@@ -93,6 +93,27 @@ def main():
                     needed = needed_libraries(consumer.read_bytes())
                     assert needed == [f"$ORIGIN/{'../' + standard + '/' if standard else ''}provider.prx.guest.prx"], needed
 
+            case = work / f"{windows}-unity"
+            modules, plugins = case / "Media" / "Modules", case / "Media" / "Plugins"
+            modules.mkdir(parents=True)
+            plugins.mkdir()
+            (modules / "provider.prx").write_bytes(module_with_symbol(True))
+            (plugins / "consumer.prx").write_bytes(module_with_symbol(False))
+            result, output = convert(case, windows)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert set((case / "app0").rglob("*.guest.prx")) == {
+                case / "app0" / "Media" / "Modules" / "provider.prx.guest.prx",
+                case / "app0" / "Media" / "Plugins" / "consumer.prx.guest.prx"}
+            if windows and os.name == "nt":
+                run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                assert run.returncode == 42, (run.returncode, run.stdout, run.stderr)
+            if not windows:
+                assert needed_libraries(output.read_bytes()) == [
+                    "$ORIGIN/app0/Media/Modules/provider.prx.guest.prx",
+                    "$ORIGIN/app0/Media/Plugins/consumer.prx.guest.prx"]
+                consumer = case / "app0" / "Media" / "Plugins" / "consumer.prx.guest.prx"
+                assert needed_libraries(consumer.read_bytes()) == ["$ORIGIN/../Modules/provider.prx.guest.prx"]
+
             case = work / f"{windows}-exclude"
             for name in ("sce_module", "prx"):
                 (case / name).mkdir(parents=True)
