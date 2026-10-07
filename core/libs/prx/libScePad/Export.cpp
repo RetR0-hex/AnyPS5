@@ -243,10 +243,15 @@ int APS5_VABI scePadVrControllerRead() {
  return 0;
 }
 
+// Name unknown. Unity calls it with an open handle and a zeroed byte, ignores the
+// result and reports twice the byte in its controller information; 0 is what it
+// assumes when nothing is written, so that is what is reported.
 APS5_EXPORT("fCWdlnmB1Ks", scePadUnknown_fCWdlnmB1Ks);
-int APS5_VABI scePadUnknown_fCWdlnmB1Ks(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI scePadUnknown_fCWdlnmB1Ks(int handle, std::uint8_t* value) {
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (value == nullptr) return PAD_ERROR_INVALID_ARG;
+ *value = 0;
+ return PAD_OK;
 }
 
 }
