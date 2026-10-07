@@ -86,6 +86,30 @@ int APS5_VABI sceVideoOutAllowOutputResolutionWqhdDetection(int handle) try {
     LibcAwaitExit_nid_postfix();
 }
 
+// Variable refresh rate: the window has no VRR to pin, so pegging and unpegging
+// only check the port. Unity passes zeros for both further arguments; their
+// meaning is unknown, so anything else is refused.
+int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t unknown1, uint64_t unknown2) try {
+    if (!VideoOutDriver::Get().IsOpen(handle)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
+    }
+    if (unknown1 != 0 || unknown2 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": unsupported arguments");
+    }
+    return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
+}
+
+int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) try {
+    if (!VideoOutDriver::Get().IsOpen(handle)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
+    }
+    return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
+}
+
 int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) try {
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
