@@ -193,8 +193,10 @@ void ValidateRange(const void* addr, size_t len, size_t alignment) {
     }
 }
 
+// 0x1/0x2/0x4 are CPU read/write/execute, 0x10/0x20 GPU read/write; 0x40-0x200 grant
+// other hardware units access (Unity maps with 0x3f2) and leave the CPU's view alone.
 int LinuxProtFromSce(int prot) {
-    if ((prot & ~0xF7) != 0) {
+    if ((prot & ~0x3F7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
         throw std::invalid_argument("Unsupported memory protection bits: " + std::to_string(prot));
     }

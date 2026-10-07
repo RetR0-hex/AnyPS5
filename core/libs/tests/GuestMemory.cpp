@@ -192,6 +192,20 @@ static void CheckCheckedReleaseDirectMemory() {
     Require(sceKernelCheckedReleaseDirectMemory(phys, page) == SCE_KERNEL_ERROR_ENOENT);
 }
 
+// Bits 0x40-0x200 give other hardware units access; the CPU sees the 0x2 (write) mapping.
+static void CheckOtherUnitProtectionBits() {
+    constexpr std::size_t page = 0x4000;
+    constexpr int unity = 0x3f2;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page, 0, 0, &phys) == 0);
+    void* mapped = nullptr;
+    Require(sceKernelMapDirectMemory(&mapped, page, unity, 0, phys, 0) == 0);
+    static_cast<unsigned char*>(mapped)[7] = 9;
+    Require(sceKernelMprotect(mapped, page, unity) == 0);
+    Require(static_cast<unsigned char*>(mapped)[7] == 9);
+    Require(sceKernelMunmap(mapped, page) == 0);
+}
+
 static void CheckDirectMemoryFollowsPhysicalPages() {
     constexpr std::size_t page = 0x4000;
     std::int64_t phys = 0;
@@ -930,6 +944,7 @@ int main() {
     CheckSharedDirectMemoryLifecycle();
     CheckGetDirectMemoryType();
     CheckMtypeprotect();
+    CheckOtherUnitProtectionBits();
     CheckHeapAfterMappingReuse();
 #ifdef _WIN32
     CheckNoOverwriteRejectsHostOccupiedMapping();
