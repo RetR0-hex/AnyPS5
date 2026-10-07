@@ -70,6 +70,7 @@ private:
     static bool copySegment(Submission& submission, const std::uint32_t* guest, std::size_t words, std::size_t& budget);
     void waitForFlipRoom(const Submission& submission);
     void waitForFrameInFlight(std::unique_lock<std::mutex>& lock, const Submission& submission);
+    void settleFrame(std::uint64_t serial, std::uint64_t batch);
     void reserveOutputs(Submission& submission);
     void executeRewindTail(const Submission& stalled);
     void enqueue(Submission submission);
@@ -230,6 +231,9 @@ private:
 
     std::map<std::uint32_t, QueueWorker> workers;
     std::uint64_t frameSerial = 0;
+    std::uint64_t unsettledFrame = 0;
+    std::uint64_t unsettledBatch = 0;
+    std::weak_ptr<VulkanDevice> unsettledDevice;
 
     std::atomic<std::uint64_t> flipsCounted{0};
     std::atomic<std::uint64_t> flipSerial{0};
@@ -294,6 +298,7 @@ private:
 
     std::uint32_t idleWaiters = 0;
     std::deque<std::uint64_t> framesInFlight;
+    std::uint64_t settledFrame = 0;
     std::uint64_t queue0Executing = 0;
     std::atomic<std::uint32_t> orderHolders{0};
     std::atomic<std::uint32_t> runningWorkers{0};

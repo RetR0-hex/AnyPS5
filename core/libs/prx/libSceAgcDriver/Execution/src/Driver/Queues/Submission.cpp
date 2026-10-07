@@ -110,12 +110,46 @@ void Driver::waitForFrameInFlight(std::unique_lock<std::mutex>& lock, const Subm
     while (framesInFlight.size() >= FramesInFlight) {
         const auto oldest = framesInFlight.front();
         ++idleWaiters;
-        changed.wait(lock, [&] { return failure != nullptr || stopping || completed >= oldest || completedOutOfOrder.contains(oldest); });
+        changed.wait(lock, [&] { return failure != nullptr || stopping || settledFrame >= oldest; });
         --idleWaiters;
         rethrowFailure();
         checkStopping();
         if (!framesInFlight.empty() && framesInFlight.front() == oldest) framesInFlight.pop_front();
     }
+}
+
+// Called by the queue worker at each flip with the recorder batch that closes the frame. A frame
+// is settled once the next flip is reached and the frame's batches finished on the host GPU and
+// were reaped: label stores recorded on the GPU and completion stores land in guest memory only
+// then, after the worker already completed the submission. Balatro (PPSA21402) keeps labels inside
+// its command buffers, and a store landing after the title rebuilt that memory corrupted the next
+// frame's packets.
+void Driver::settleFrame(std::uint64_t serial, std::uint64_t batch) {
+    const auto previous = std::exchange(unsettledFrame, serial);
+    const auto previousBatch = std::exchange(unsettledBatch, batch);
+    auto previousDevice = std::exchange(unsettledDevice, device.Load()).lock();
+    if (previous == 0) return;
+    if (previousBatch != 0 && previousDevice != nullptr) {
+        bool waitUnlocked = false;
+        {
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            if (device.Load() != previousDevice) previousDevice.reset();
+            else if (previousDevice->CanWaitUnlocked()) waitUnlocked = true;
+            else previousDevice->WaitIdle();
+        }
+        if (waitUnlocked) {
+            previousDevice->WaitRecorded(previousBatch);
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            previousDevice->ReapRecorded(previousBatch);
+        }
+    }
+    {
+        std::lock_guard lock(mutex);
+        settledFrame = previous;
+    }
+    changed.notify_all();
 }
 
 void Driver::reserveOutputs(Submission& submission) {
