@@ -396,6 +396,10 @@ void APS5_VABI scePthreadExit(void* retval) {
     throw std::runtime_error("Native thread exit returned");
 }
 
+PthreadPrivate* ExchangeCurrentGuestThread(PthreadPrivate* thread) {
+    return std::exchange(currentThread, thread);
+}
+
 Pthread APS5_VABI scePthreadSelf() {
 #ifdef _WIN32
     if (!currentThread) {
