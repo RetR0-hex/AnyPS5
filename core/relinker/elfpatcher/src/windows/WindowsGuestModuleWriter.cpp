@@ -10,6 +10,10 @@
 #include <map>
 #include <iterator>
 
+namespace {
+constexpr char GuestStartExport[] = "__aps5_guest_start";
+}
+
 namespace Elfpatcher {
 
 std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestImage& guest, Domain::GuestRuntime& runtime) const {
@@ -108,6 +112,16 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
         nextRva = AlignRva(nextRva + sections.back().Data.size());
     }
     std::map<std::string, std::uint32_t> exports;
+    if (runtime.DeferredStart) {
+        // Read by sceKernelLoadStartModule: init RVA, init array slot count, then the slot RVAs.
+        PeSection start{".gstart", nextRva, SectionRead | 0x40u, {}};
+        Io::AppendU32(start.Data, guest.Init == 0 ? 0 : image.GetRva(guest.Init));
+        Io::AppendU32(start.Data, CheckedRva(guest.InitArray.size()));
+        for (const auto slot : guest.InitArray) Io::AppendU32(start.Data, image.GetRva(slot, 8));
+        if (!exports.emplace(GuestStartExport, start.Rva).second) throw Domain::RelinkerException("Duplicate guest export: " + std::string(GuestStartExport));
+        nextRva = AlignRva(nextRva + start.Data.size());
+        sections.push_back(std::move(start));
+    }
     PeSection tlsExports{".tlsrefs", nextRva, SectionRead | 0x40u, {}};
     for (const auto& symbol : guest.Symbols) {
         if (symbol.Section == 0 || symbol.Section == Relinker::AbsoluteSection || (symbol.Info >> 4) == 0 || symbol.Visibility == 1 || symbol.Visibility == 2) continue;

@@ -22,6 +22,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     const bool hasPrx = std::filesystem::exists(prx);
     // Unity keeps the game's own modules here: Modules are needed by the executable, Plugins are loaded at run time.
     const std::filesystem::path unity[] = {root / "Media" / "Modules", root / "Media" / "Plugins"};
+    const auto& plugins = unity[1];
     const bool hasUnity = std::any_of(std::begin(unity), std::end(unity), [](const auto& path) { return std::filesystem::exists(path); });
     if (hasSingular && hasPlural) throw Domain::RelinkerException("Both sce_module and sce_modules exist beside the input executable");
     if (!hasSingular && !hasPlural && !hasPrx && !hasUnity) throw Domain::RelinkerException("sce_module/sce_modules/prx was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
@@ -173,6 +174,9 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         order.push_back(index);
     };
     for (std::size_t index = 0; index < images.size(); ++index) visit(index);
+    // Unity's player loads its plugins itself and passes their start function
+    // arguments, so a plugin nothing else needs is started then, not at program start.
+    std::set<std::string> neededNames;
     std::vector<std::string> hostLibraries;
     std::set<std::string> uniqueHosts;
     const auto addHost = [&](const std::string& name) {
@@ -188,9 +192,13 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         const auto start = dynamic.DynStrData.begin() + nameOffset;
         const auto end = std::find(start, dynamic.DynStrData.end(), 0);
         if (end == dynamic.DynStrData.end()) throw Domain::RelinkerException("Unterminated dependency string");
+        neededNames.insert(std::string(start, end));
         addHost(std::string(start, end));
     }
-    for (const auto& image : images) for (const auto& dependency : image.Dependencies) addHost(dependency);
+    for (const auto& image : images) for (const auto& dependency : image.Dependencies) {
+        neededNames.insert(dependency);
+        addHost(dependency);
+    }
     if (uniqueHosts.contains("libSceLibcInternal.prx") && uniqueHosts.insert("libc.prx").second) hostLibraries.push_back("libc.prx");
     dynamic.DynamicSegmentData.clear();
     const auto addNeeded = [&](const std::string& name) {
@@ -217,6 +225,8 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         if (std::filesystem::exists(target) && std::filesystem::equivalent(inputPath, target)) throw Domain::RelinkerException("Guest output would overwrite the input executable");
         Domain::GuestRuntime runtime;
         runtime.UsePlatformTlsResolver = image.UsePlatformTlsResolver;
+        runtime.DeferredStart = image.SourcePath.parent_path() == plugins &&
+            !neededNames.contains(image.SourcePath.filename().string()) && (image.Soname.empty() || !neededNames.contains(image.Soname));
         runtime.Path = relativeDirectory + "/" + image.OutputName;
         runtime.Names = {image.SourcePath.filename().string(), image.Soname};
         std::vector<std::uint8_t> output;
