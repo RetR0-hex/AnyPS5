@@ -1,4 +1,6 @@
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -22,11 +24,12 @@ int APS5_VABI sceAudioOut2MasteringGetState(AudioOut2MasteringStatesHeader* stat
     return 0;
 }
 
+// The output here has no mastering stage (loudness, limiter, ...), so its
+// settings are accepted and leave the sound as it is.
 int APS5_VABI sceAudioOut2MasteringSetParam(const AudioOut2MasteringParamsHeader* param, uint32_t output, uint32_t flags) {
-    (void)param;
     (void)output;
     (void)flags;
-    NotImplemented_nid_no_patch(__func__);
+    if (param == nullptr) throw std::runtime_error(std::string(__func__) + ": null parameters");
     return 0;
 }
 
