@@ -161,13 +161,17 @@ std::uint64_t NullPixelProgramAddress() {
     return reinterpret_cast<std::uintptr_t>(NullPixelCode);
 }
 
+constexpr std::size_t ShaderHeaderAlignment = alignof(std::uint32_t);
+
 void Driver::RegisterShader(const Shader* shader) {
     CheckFailure();
-    GuestMemory::CheckRange(shader, sizeof(Shader), alignof(Shader));
+    // Shader binaries keep headers on 4-byte boundaries (NINJA GAIDEN: Ragebound's
+    // Unity shaders do); the console takes them, and x86 reads them unaligned.
+    GuestMemory::CheckRange(shader, sizeof(Shader), ShaderHeaderAlignment);
     require(shader->file_header == 0x34333231u && shader->version == 0x18u, "invalid shader header");
     require(shader->header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
     require(shader->shader_size != 0 && (shader->shader_size & 3u) == 0, "invalid shader size");
-    GuestMemory::CheckRange(shader, shader->header_size, alignof(Shader));
+    GuestMemory::CheckRange(shader, shader->header_size, ShaderHeaderAlignment);
     const auto* code = const_cast<const void*>(shader->code);
     GuestMemory::CheckRange(code, shader->shader_size, 256);
     ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), shader->type, {}, {}};
