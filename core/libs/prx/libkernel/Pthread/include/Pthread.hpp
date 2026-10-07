@@ -101,4 +101,7 @@ struct PthreadPrivate {
 
 bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
 
+// Makes scePthreadSelf on this native thread return `thread`; returns the previous one.
+extern "C" PthreadPrivate* ExchangeCurrentGuestThread(PthreadPrivate* thread);
+
 #endif
