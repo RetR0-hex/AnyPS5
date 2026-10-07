@@ -1266,6 +1266,8 @@ struct NpEntitlementAccessAddcontEntitlementInfo {
     std::uint32_t download_status;
 };
 
+struct NpEntitlementAccessEntitlementKey { char data[16]; };
+
 
 
 struct NpUniversalDataSystemInitParam {

@@ -164,6 +164,11 @@ int APS5_VABI sceNpUnregisterStateCallback(void) {
     return 0;
 }
 
+// Nothing is registered (the callback never fires while signed out), so there is nothing to remove.
+int APS5_VABI sceNpUnregisterNpReachabilityStateCallback(void) {
+    return 0;
+}
+
 int APS5_VABI sceNpGetAccountLanguage2(int req_id, int user_id, void* language) {
     (void)req_id;
     (void)user_id;
