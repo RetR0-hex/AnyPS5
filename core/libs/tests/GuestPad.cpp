@@ -3,6 +3,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <thread>
 
@@ -17,6 +18,7 @@ int APS5_VABI scePadReadState(int, PadData*);
 int APS5_VABI scePadSetTiltCorrectionState(int, bool);
 int APS5_VABI scePadResetOrientation(int);
 int APS5_VABI scePadSetAngularVelocityDeadbandState(int, bool);
+int APS5_VABI scePadUnknown_fCWdlnmB1Ks(int, std::uint8_t*);
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -82,6 +84,10 @@ int main() {
     CheckTiltCorrection(handle);
     CheckTouchContact();
     CheckReadStateHandle(handle);
+    std::uint8_t unknown = 7;
+    Require(scePadUnknown_fCWdlnmB1Ks(handle, &unknown) == PAD_OK && unknown == 0);
+    Require(scePadUnknown_fCWdlnmB1Ks(handle + 1, &unknown) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadUnknown_fCWdlnmB1Ks(handle, nullptr) == PAD_ERROR_INVALID_ARG);
     Require(scePadGetHandle(0xff, 16, 0) == handle);
     Require(scePadGetHandle(user, 16, 0) == noHandle);
     Require(scePadGetHandle(user, 0, 1) == noHandle);
