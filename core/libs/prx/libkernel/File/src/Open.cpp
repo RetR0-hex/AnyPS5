@@ -8,6 +8,8 @@
 #include "SceTypes.hpp"
 
 #include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -49,7 +51,16 @@ static int NativeWrite(int fd, const void* buf, std::size_t n) {
     }
     return ::_write(fd, buf, static_cast<unsigned int>(n));
 }
-static int NativeClose(int fd) { return ::_close(fd); }
+// Exported by the UCRT; MinGW's headers only declare the process-wide variant.
+extern "C" _invalid_parameter_handler __cdecl _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, std::uintptr_t) {}
+// A bad descriptor is an error the guest gets back (EBADF), not a crash to report.
+static int NativeClose(int fd) {
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
+    const int result = ::_close(fd);
+    _set_thread_local_invalid_parameter_handler(previous);
+    return result;
+}
 static int NativeUnlink(const std::filesystem::path& p) {
     return ::_wunlink(p.wstring().c_str());
 }
@@ -131,9 +142,9 @@ int APS5_VABI sceKernelClose(int d) {
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);
 #endif
-    if (NativeClose(d) != 0) {
-        throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-    }
+    // Unity closes the descriptor of a file it failed to open, which is 0; the
+    // console answers EBADF, so this returns the error instead of stopping.
+    if (NativeClose(d) != 0) return SceErrorFromErrno(errno);
     return 0;
 }
 
