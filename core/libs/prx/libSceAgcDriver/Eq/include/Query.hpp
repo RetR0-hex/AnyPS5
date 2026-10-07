@@ -3,6 +3,7 @@
 
 #include "SceTypes.hpp"
 
+extern "C" uint32_t APS5_VABI sceAgcDriverGetEqContextId(const KernelEvent* ev);
 extern "C" int APS5_VABI sceAgcDriverGetEqEventType(const KernelEvent* ev);
 
 #endif

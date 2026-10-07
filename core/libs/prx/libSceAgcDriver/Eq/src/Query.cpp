@@ -10,10 +10,13 @@
 
 extern "C" {
 
+// The driver submits all graphics work on one context, so every event it raises
+// belongs to context 0 (Unity indexes per-context timing slots with it).
 uint32_t APS5_VABI sceAgcDriverGetEqContextId(const KernelEvent* ev) {
- (void)ev;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (ev == nullptr || reinterpret_cast<std::uintptr_t>(ev) % alignof(KernelEvent) != 0) {
+        throw std::runtime_error(std::string(__func__) + ": null or misaligned event");
+    }
+    return 0;
 }
 
 int APS5_VABI sceAgcDriverGetEqEventType(const KernelEvent* ev) {

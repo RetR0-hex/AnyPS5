@@ -61,6 +61,8 @@ void testEvents() {
     expectFailure([&] { sceAgcDriverGetEqEventType(&event); });
     expectFailure([] { sceAgcDriverGetEqEventType(nullptr); });
     expectFailure([&] { sceAgcDriverGetEqEventType(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
+    check(sceAgcDriverGetEqContextId(&event) == 0, "graphics events belong to context 0");
+    expectFailure([] { sceAgcDriverGetEqContextId(nullptr); });
 }
 
 void testValidation() {
