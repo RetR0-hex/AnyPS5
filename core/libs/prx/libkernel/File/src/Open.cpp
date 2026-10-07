@@ -16,7 +16,22 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
+// On the console descriptors 0-2 are always stdin, stdout and stderr, so a game's
+// first file is never 0 (Unity treats 0 as "no file"). A program started without
+// them would hand them out, so they are filled with NUL first.
+static bool ReserveStandardDescriptors() {
+    for (;;) {
+        const int fd = ::_open("NUL", _O_RDWR | _O_BINARY);
+        if (fd < 0) return false;
+        if (fd > 2) {
+            ::_close(fd);
+            return true;
+        }
+    }
+}
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
+    static const bool reserved = ReserveStandardDescriptors();
+    (void)reserved;
     return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
