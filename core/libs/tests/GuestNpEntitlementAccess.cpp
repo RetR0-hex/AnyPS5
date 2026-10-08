@@ -10,8 +10,9 @@ int APS5_VABI sceNpEntitlementAccessGetEntitlementKey(std::uint32_t service_labe
 
 namespace {
 
-constexpr int Parameter = static_cast<int>(0x80558003u);
-constexpr int NotFound = static_cast<int>(0x80558007u);
+// Key lookup keeps upstream's API errors while still honoring the configured owned add-ons.
+constexpr int Parameter = static_cast<int>(0x817D0002u);
+constexpr int NotFound = static_cast<int>(0x817D0007u);
 
 void Require(bool condition, const char* message) {
     if (!condition) {

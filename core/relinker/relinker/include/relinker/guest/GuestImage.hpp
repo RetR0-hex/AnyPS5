@@ -42,7 +42,9 @@ struct GuestImage {
     bool UsePlatformTlsResolver = true;
 
     bool OwnsLifecycle() const {
-        return ReplacementModule.empty() || ReplacementModule == "libc.prx";
+        // Converted guest images retain their own constructors and destructors. Replacement-module
+        // routing is no longer part of GuestImage, so lifecycle ownership is unconditional.
+        return true;
     }
 };
 

@@ -56,6 +56,43 @@ std::string vteMessage(std::uint32_t viewportControl) {
     return message.str();
 }
 
+std::string conservativeMessage(std::uint32_t control) {
+    std::ostringstream message;
+    message << "AGC graphics: PA_SC_CONSERVATIVE_RASTERIZATION_CNTL=0x" << std::hex << control << ": only 0x6000 (off) and 0x6001 (overestimation) are supported";
+    return message.str();
+}
+
+void requireConservativeTriangles(bool triangles, const char* primitive, const char* source, std::uint32_t value) {
+    if (triangles) return;
+    std::ostringstream message;
+    message << "AGC graphics: conservative rasterization of " << primitive << " is unsupported (" << source << "=0x" << std::hex << value << "): only triangles are overestimated";
+    throw std::runtime_error(message.str());
+}
+
+VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueState& queue) {
+    const auto& cx = queue.context;
+    const auto control = read(cx, 0x313);
+    if (control == 0x6000u) return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    if (control != 0x6001u) throw std::runtime_error(conservativeMessage(control));
+    const auto stages = read(cx, 0x2d5);
+    if ((stages & 0x20u) != 0) {
+        const auto output = read(cx, 0x29b);
+        const auto type = output & 0x3fu;
+        const bool perStream = (output & 0x80000000u) != 0;
+        requireConservativeTriangles(!perStream && type == 2u, perStream ? "per-stream primitive types" : type == 0u ? "points" : type == 1u ? "lines" : "other primitive types", "VGT_GS_OUT_PRIM_TYPE", output);
+    } else if ((stages & 4u) != 0) {
+        const auto parameters = read(cx, 0x2db);
+        const auto domain = parameters & 3u;
+        const auto topology = (parameters >> 5u) & 7u;
+        requireConservativeTriangles((domain == 1u || domain == 2u) && (topology == 2u || topology == 3u), topology == 0u ? "points" : topology == 1u || domain == 0u ? "lines" : "other primitive types", "VGT_TF_PARAM", parameters);
+    } else {
+        const auto primitive = read(queue.userConfig, 0x242, RegisterBank::UserConfig);
+        requireConservativeTriangles(primitive == 4u || primitive == 5u || primitive == 6u, primitive == 1u ? "points" : primitive == 2u || primitive == 3u ? "lines" : primitive == 7u || primitive == 17u ? "rectangles" : "other primitive types", "VGT_PRIMITIVE_TYPE", primitive);
+    }
+    Require((read(cx, 0x1b3) & 0x44u) == 0, "conservative rasterization with centroid interpolation is unsupported");
+    return VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+}
+
 // The register rules DecodeState and DrawRejection share (the precheck must reject exactly what
 // DecodeState would): the masks whose set bits are unsupported, and the depth-control verdict.
 // Render target index, viewport index and the misc export vector that carries them are accepted but
@@ -73,7 +110,9 @@ constexpr std::uint32_t AaConfigSamplesMask = 0x7u;
 // DB_RENDER_CONTROL: stencil clear is emitted with vkCmdClearAttachments; disabling stencil
 // compression only changes the guest GPU's internal representation, which Vulkan manages itself.
 constexpr std::uint32_t DbRenderControlUnsupportedMask = 0x00001f9du;
-constexpr std::uint32_t ScanModeMask = ~3u;
+// MSAA_ENABLE (bit 0), viewport scissor (bit 1) and ALTERNATE_RBS_PER_TILE (bit 5).
+// Alternating raster backends affects scheduling, not the pixels produced by a draw.
+constexpr std::uint32_t ScanModeMask = ~0x23u;
 constexpr std::uint32_t ScanControlMask = ~0x06023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
 // Bits 26/27 (ZCLIP_NEAR/FAR_DISABLE) become depth clamping; bit 19 selects the [0, 1] clip space.
@@ -245,7 +284,8 @@ std::uint32_t effectiveDepthControl(std::uint32_t depthControl) {
 }
 
 bool colorControlSupported(std::uint32_t colorControl, bool hasColorTarget) {
-    return colorControl == 0xcc0010u || (!hasColorTarget && (colorControl & ~0x70u) == 0xcc0000u);
+    colorControl &= ~1u;
+    return colorControl == 0xcc0010u || ((colorControl >> 4u) & 7u) == 0u || (!hasColorTarget && (colorControl & ~0x70u) == 0xcc0000u);
 }
 
 std::string colorControlMessage(std::uint32_t colorControl) {
@@ -303,7 +343,7 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
     };
     const bool alternate = swap == 1;
     const auto single = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
-    if (swap > 1 && format != 1 && format != 2 && format != 4) return fail();
+    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12) return fail();
     switch (format) {
         case 1:
             if (number == unorm) return single(VK_FORMAT_R8_UNORM, 1);
@@ -342,23 +382,27 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             // COLOR_2_10_10_10 keeps red in the low bits, the Vulkan A2B10G10R10 packing.
             if (number != unorm) return fail();
             return {alternate ? VK_FORMAT_A2R10G10B10_UNORM_PACK32 : VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4};
-        case 10:
-            if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4};
-            if (number == snorm) return {alternate ? VK_FORMAT_B8G8R8A8_SNORM : VK_FORMAT_R8G8B8A8_SNORM, 4};
-            if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4};
+        case 10: {
+            const auto reversed = static_cast<std::uint8_t>(swap == 2 ? 0x1bu : swap == 3 ? 0x93u : 0xe4u);
+            if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4, reversed};
+            if (number == snorm) return {alternate ? VK_FORMAT_B8G8R8A8_SNORM : VK_FORMAT_R8G8B8A8_SNORM, 4, reversed};
+            if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4, reversed};
             return fail();
+        }
         case 11:
             if (swap != 0) return fail();
             if (number == floating) return {VK_FORMAT_R32G32_SFLOAT, 8};
             if (number == uint) return {VK_FORMAT_R32G32_UINT, 8};
             return fail();
-        case 12:
-            if (swap != 0) return fail();
-            if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8};
-            if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8};
-            if (number == snorm) return {VK_FORMAT_R16G16B16A16_SNORM, 8};
-            if (number == uint) return {VK_FORMAT_R16G16B16A16_UINT, 8};
+        case 12: {
+            if (swap == 1) return fail();
+            const auto reversed = static_cast<std::uint8_t>(swap == 2 ? 0x1bu : swap == 3 ? 0x93u : 0xe4u);
+            if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8, reversed};
+            if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8, reversed};
+            if (number == snorm) return {VK_FORMAT_R16G16B16A16_SNORM, 8, reversed};
+            if (number == uint) return {VK_FORMAT_R16G16B16A16_UINT, 8, reversed};
             return fail();
+        }
         case 14:
             if (swap != 0) return fail();
             if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16};
@@ -408,7 +452,7 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
     APS5_LOG_OUT_DEBUG("DecodeShaderStages value=0x%x primitive=%u path=%u vertexWave=%u", value, primitive, static_cast<unsigned>(result.path), result.vertexWaveSize);
     if (path == ShaderPath::Vertex) {
         validate((value & 0x2000u) != 0, "legacy vertex routing without PRIMGEN_EN is unsupported");
-        validate((value & ~0x02402010u) == 0, "unsupported vertex routing, scheduling or wave-ID state");
+        validate((value & ~0x0247a010u) == 0, "unsupported vertex routing, scheduling or wave-ID state");
     } else if (path == ShaderPath::Tessellation) {
         validate((value & 0x00600020u) == 0, "wave32 tessellation or geometry amplification is unsupported");
         validate((value & ~0x0007ed0du) == 0 && (value & 3u) == 1u && ((value >> 3u) & 3u) == 1u, "unsupported tessellation routing");
@@ -441,12 +485,20 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
     return result;
 }
 
+std::string DepthMaintenanceRejection(const QueueState& queue) {
+    const auto control = find(queue.context, 0x000);
+    if (control == queue.context.end() || (control->second & ~0x2063u) == 0) return {};
+    return zeroMessage(0x000, control->second, "DB_RENDER_CONTROL depth copy, resummarize or decompress");
+}
+
 State DecodeState(const QueueState& queue) {
+    if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     const auto& cx = queue.context;
     State result{};
     const auto sampleConfig = DecodeSampleConfiguration(cx);
     result.samples = sampleConfig.samples;
     result.exposedSamples = sampleConfig.exposedSamples;
+    result.conservativeRasterization = decodeConservativeRasterization(queue);
     result.stages = DecodeShaderStages(queue);
     const auto primitive = read(queue.userConfig, 0x242, RegisterBank::UserConfig);
     APS5_LOG_OUT_DEBUG("DecodeState primitive=%u path=%u vertexWave=%u", primitive, static_cast<unsigned>(result.stages.path), result.stages.vertexWaveSize);
@@ -508,7 +560,6 @@ State DecodeState(const QueueState& queue) {
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
     Require((read(cx, 0x8c) & 0xfu) == 0xau, "nonstandard triangle edge rules are unsupported");
     Require(read(cx, 0x2f9) == 0x2du, "nonstandard pixel center or vertex quantization is unsupported");
-    Require(read(cx, 0x313) == 0x6000u, "conservative rasterization is unsupported");
     Require(read(cx, 0x30e) == 0xffffffffu && read(cx, 0x30f) == 0xffffffffu, "sample masks are unsupported");
     const auto viewportControl = read(cx, 0x206);
     if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
@@ -539,6 +590,7 @@ State DecodeState(const QueueState& queue) {
     for (std::uint32_t index = 0; index < exportSlots.size(); ++index) {
         if (written(exportSlots[index])) exportCount = index + 1;
     }
+    if (((read(cx, 0x202) >> 4u) & 7u) == 0u) exportCount = 0;
     result.hasColorTarget = exportCount != 0;
     APS5_LOG_OUT_DEBUG("hasColorTarget=%u exports=%u", result.hasColorTarget ? 1u : 0u, exportCount);
 
@@ -623,6 +675,7 @@ State DecodeState(const QueueState& queue) {
             if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
         }
         state.blendEnable = (blend >> 30u) & 1u;
+        if (state.blendEnable && (mapping == 0x1bu || mapping == 0x93u)) throw std::runtime_error("AGC graphics: blending into a color target with a reversed component order is not implemented");
         if (state.blendEnable) {
             Require((read(cx, 0x31c + slot * 0xfu) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
             state.srcColorBlendFactor = blendFactor(blend & 0x1fu);
@@ -766,6 +819,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
             const auto dccHigh = find(cx, 0x3a8 + slot);
             color.dccAddress = ((dccHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(dccHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x325 + stride)) << 8u);
             color.dccAlphaOnMsb = DccAlphaOnMsb(color.format, swap);
+            color.dccPipeAligned = ((attrib3 >> 30u) & 1u) != 0;
         } else {
             static bool reported = false;
             if (!reported) {
@@ -830,6 +884,7 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
 }
 
 std::string DrawRejection(const QueueState& queue, bool indexed) {
+    if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) return reason;
     const auto& cx = queue.context;
     // A register a rule needs that is absent gives no verdict here: DecodeState reports it.
     const auto value = [&](const Registers& registers, std::uint32_t offset, std::uint32_t& out) {
@@ -872,7 +927,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x83, word) && word != 0xffffu) return require(false, "clip rectangles are unsupported");
     if (value(cx, 0x8c, word) && (word & 0xfu) != 0xau) return require(false, "nonstandard triangle edge rules are unsupported");
     if (value(cx, 0x2f9, word) && word != 0x2du) return require(false, "nonstandard pixel center or vertex quantization is unsupported");
-    if (value(cx, 0x313, word) && word != 0x6000u) return require(false, "conservative rasterization is unsupported");
+    if (value(cx, 0x313, word) && word != 0x6000u && word != 0x6001u) return conservativeMessage(word);
     std::uint32_t other = 0;
     if (value(cx, 0x30e, word) && value(cx, 0x30f, other) && (word != 0xffffffffu || other != 0xffffffffu)) return require(false, "sample masks are unsupported");
     if (value(cx, 0x206, word) && word != 0x43fu) return vteMessage(word);

@@ -141,6 +141,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GuestMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubgroupClock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
@@ -219,6 +220,16 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_write_watch_coverage_tests tests/WriteWatchCoverage.cpp)
+    target_include_directories(agc_write_watch_coverage_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_write_watch_coverage_tests PRIVATE libc)
+    configure_windows_unwind(agc_write_watch_coverage_tests)
+    add_test(NAME agc_write_watch_coverage COMMAND agc_write_watch_coverage_tests)
+    if(WIN32)
+        set_tests_properties(agc_write_watch_coverage PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(agc_profile_output_tests tests/ProfileOutput.cpp)
     target_include_directories(agc_profile_output_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_profile_output_tests PRIVATE libc)
@@ -289,6 +300,18 @@ add_test_executable(agc_structurizer_tests EXCLUDE_FROM_ALL tests/Structurizer.c
 target_link_libraries(agc_structurizer_tests PRIVATE shader_recompiler_agc_driver libc)
 set_target_properties(agc_structurizer_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_structurizer_tests)
+
+add_test_executable(agc_subgroup_clock_tests EXCLUDE_FROM_ALL
+        tests/SubgroupClock.cpp
+        Execution/src/SubgroupClock.cpp
+)
+target_include_directories(agc_subgroup_clock_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include)
+set_target_properties(agc_subgroup_clock_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_subgroup_clock_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_subgroup_clock_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_subgroup_clock COMMAND agc_subgroup_clock_tests)
+endif()
 
 add_test_executable(agc_spirv_module_tests EXCLUDE_FROM_ALL tests/SpirvModule.cpp)
 target_link_libraries(agc_spirv_module_tests PRIVATE shader_recompiler_agc_driver libc)
@@ -680,6 +703,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/PresentationScaler.cpp
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
+            Execution/src/SubgroupClock.cpp
             Graphics/src/Draw.cpp
             Graphics/src/DepthSurface.cpp
             Graphics/src/ColorTargetLayout.cpp

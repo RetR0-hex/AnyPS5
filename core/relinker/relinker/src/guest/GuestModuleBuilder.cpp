@@ -13,6 +13,25 @@
 
 namespace Relinker {
 
+namespace {
+
+std::vector<std::string> ReadNeededNames(const Domain::SysVDynamicSection& dynamic) {
+    if (dynamic.DynamicSegmentData.size() % 16 != 0) throw Domain::RelinkerException("Invalid executable dependency table");
+    std::vector<std::string> names;
+    for (std::size_t offset = 0; offset < dynamic.DynamicSegmentData.size(); offset += 16) {
+        if (Io::ReadU64(dynamic.DynamicSegmentData, offset) != 1) throw Domain::RelinkerException("Unexpected executable dependency tag");
+        const auto nameOffset = Io::ReadU64(dynamic.DynamicSegmentData, offset + 8);
+        if (nameOffset >= dynamic.DynStrData.size()) throw Domain::RelinkerException("Invalid dependency string offset");
+        const auto start = dynamic.DynStrData.begin() + static_cast<std::ptrdiff_t>(nameOffset);
+        const auto end = std::find(start, dynamic.DynStrData.end(), 0);
+        if (end == dynamic.DynStrData.end()) throw Domain::RelinkerException("Unterminated dependency string");
+        names.emplace_back(start, end);
+    }
+    return names;
+}
+
+}
+
 std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath, Domain::SysVDynamicSection& dynamic, const bool windows, const bool toIntel, ISyscallScanner& syscallScanner, const bool lazyBinding, const std::string& runPath, const std::set<std::string>& excludedModules) const {
     const auto root = std::filesystem::absolute(inputPath).parent_path();
     const auto singular = root / "sce_module";
@@ -52,16 +71,9 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             if (isElf(entry.path())) paths.push_back(entry.path());
         }
     }
-    if (dynamic.DynamicSegmentData.size() % 16 != 0) throw Domain::RelinkerException("Invalid executable dependency table");
+    const auto neededNames = ReadNeededNames(dynamic);
     std::set<std::string> missingNeeded;
-    for (std::size_t offset = 0; offset < dynamic.DynamicSegmentData.size(); offset += 16) {
-        if (Io::ReadU64(dynamic.DynamicSegmentData, offset) != 1) continue;
-        const auto nameOffset = Io::ReadU64(dynamic.DynamicSegmentData, offset + 8);
-        if (nameOffset >= dynamic.DynStrData.size()) throw Domain::RelinkerException("Invalid dependency string offset");
-        const auto start = dynamic.DynStrData.begin() + static_cast<std::ptrdiff_t>(nameOffset);
-        const auto end = std::find(start, dynamic.DynStrData.end(), 0);
-        if (end == dynamic.DynStrData.end()) throw Domain::RelinkerException("Unterminated dependency string");
-        const std::string name(start, end);
+    for (const auto& name : neededNames) {
         if (excludedModules.contains(name)) continue;
         if (std::none_of(paths.begin(), paths.end(), [&](const auto& path) { return path.filename().string() == name; })) missingNeeded.insert(name);
     }
@@ -216,26 +228,17 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     for (std::size_t index = 0; index < images.size(); ++index) visit(index);
     std::vector<std::string> hostLibraries;
     std::set<std::string> uniqueHosts;
-    std::set<std::string> neededNames;
+    // Keep explicit module dependencies in the eager/lazy decision while reusing the executable
+    // dependency names already parsed for module discovery above.
+    std::set<std::string> declaredNeededNames(neededNames.begin(), neededNames.end());
     const auto addHost = [&](const std::string& name) {
         if (findGuest(name) != guestNames.end()) return;
         if (name.empty() || name.find_first_of("/\\:$") != std::string::npos) throw Domain::RelinkerException("Invalid host dependency: " + name);
         if (uniqueHosts.insert(name).second) hostLibraries.push_back(name);
     };
-    if (dynamic.DynamicSegmentData.size() % 16 != 0) throw Domain::RelinkerException("Invalid executable dependency table");
-    for (std::size_t offset = 0; offset < dynamic.DynamicSegmentData.size(); offset += 16) {
-        if (Io::ReadU64(dynamic.DynamicSegmentData, offset) != 1) throw Domain::RelinkerException("Unexpected executable dependency tag");
-        const auto nameOffset = Io::ReadU64(dynamic.DynamicSegmentData, offset + 8);
-        if (nameOffset >= dynamic.DynStrData.size()) throw Domain::RelinkerException("Invalid dependency string offset");
-        const auto start = dynamic.DynStrData.begin() + nameOffset;
-        const auto end = std::find(start, dynamic.DynStrData.end(), 0);
-        if (end == dynamic.DynStrData.end()) throw Domain::RelinkerException("Unterminated dependency string");
-        const std::string name(start, end);
-        neededNames.insert(name);
-        addHost(name);
-    }
+    for (const auto& name : neededNames) addHost(name);
     for (const auto& image : images) for (const auto& dependency : image.Dependencies) {
-        neededNames.insert(dependency);
+        declaredNeededNames.insert(dependency);
         addHost(dependency);
     }
     if (uniqueHosts.contains("libSceLibcInternal.prx") && uniqueHosts.insert("libc.prx").second) hostLibraries.push_back("libc.prx");
@@ -265,7 +268,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         Domain::GuestRuntime runtime;
         runtime.UsePlatformTlsResolver = image.UsePlatformTlsResolver;
         runtime.DeferredStart = image.SourcePath.parent_path() == plugins &&
-            !neededNames.contains(image.SourcePath.filename().string()) && (image.Soname.empty() || !neededNames.contains(image.Soname));
+            !declaredNeededNames.contains(image.SourcePath.filename().string()) && (image.Soname.empty() || !declaredNeededNames.contains(image.Soname));
         runtime.Path = relativeDirectory + "/" + image.OutputName;
         runtime.Names = {image.SourcePath.filename().string(), image.Soname};
         std::vector<std::uint8_t> output;
