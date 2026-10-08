@@ -24,5 +24,12 @@ int main() {
     Require(fd > 2);
     Require(sceKernelClose(fd) == 0);
     Require(sceKernelClose(fd) == SCE_KERNEL_ERROR_EBADF);  // closing twice is an error, not a crash
+
+    // Unity closes 0 for a file it failed to open; that must not free 0 for the next file.
+    Require(sceKernelClose(0) == 0);
+    const int first = sceKernelOpen(path.string().c_str(), 0, 0);
+    const int second = sceKernelOpen(path.string().c_str(), 0, 0);
+    Require(first > 2 && second > 2 && first != second);
+    Require(sceKernelClose(first) == 0 && sceKernelClose(second) == 0);
     std::filesystem::remove(path);
 }
