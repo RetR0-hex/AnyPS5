@@ -36,6 +36,12 @@ python3 tools/check_conventions.py --base origin/main
 
 The [pull request template](.github/pull_request_template.md) is the checklist for these rules.
 
+Commit author and co-author identities must belong to human contributors. Claude and Codex identities are rejected by the Conventions check. To enable the same check before each local commit, run this once per clone:
+
+```
+git config core.hooksPath .githooks
+```
+
 - One branch per topic, based on current `main`. Follow-up work goes in a new pull request, not into an open one.
 - Before starting, check that no open pull request already implements the same functions.
 - Keep the branch up to date with `main` and resolve conflicts yourself; rebasing and force-pushing is fine.

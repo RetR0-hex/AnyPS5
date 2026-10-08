@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from pathlib import PurePosixPath
+from check_commit_metadata import violations as commit_metadata_violations
 
 RULES = {
     "comment": ("error", "docs/dev/CONVENTIONS.md", "Comments are only for technical debt, so they need a change to docs/dev/TechnicalDebt.md in the same pull request; #endif and namespace ends are always allowed"),
@@ -19,6 +20,7 @@ RULES = {
     "binary": ("error", "docs/dev/CONVENTIONS.md", "Only UTF-8 text files in the repository; images go in the gist comments"),
     "doc-link": ("error", "CONTRIBUTING.md#documentation", "Relative link to a file that does not exist"),
     "commit-subject": ("error", "docs/dev/CONVENTIONS.md", "Commit subject is not Conventional Commits"),
+    "commit-attribution": ("error", "CONTRIBUTING.md#branches-and-pull-requests", "Claude and Codex cannot be commit authors or co-authors"),
     "pr-title": ("error", "docs/dev/CONVENTIONS.md", "Pull request title is not Conventional Commits"),
     "pr-template": ("error", ".github/pull_request_template.md", "Fill in the pull request template"),
 }
@@ -156,6 +158,10 @@ class Check:
             sha, subject = line.split(" ", 1)
             if not CONVENTIONAL.match(subject):
                 self.report("commit-subject", "", 0, f"{sha} {subject}")
+        for sha in git("log", "--format=%H", f"{self.base}..{self.head}").splitlines():
+            author, message = git("show", "-s", "--format=%an <%ae>%n%B", sha).split("\n", 1)
+            for violation in commit_metadata_violations(author, message):
+                self.report("commit-attribution", "", 0, f"{sha[:7]} {violation}")
 
     def pull_request(self, title, body):
         if not CONVENTIONAL.match(title):
