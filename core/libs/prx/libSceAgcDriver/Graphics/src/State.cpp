@@ -66,6 +66,9 @@ constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // to run, which it always does here.
 constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u);
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
+// PA_SC_AA_CONFIG.MSAA_NUM_SAMPLES; the other fields (centroid mask, sample distance,
+// exposed samples) only take effect with more than one sample (Unity sets them anyway).
+constexpr std::uint32_t AaConfigSamplesMask = 0x70u;
 constexpr std::uint32_t ScanModeMask = ~2u;
 constexpr std::uint32_t ScanControlMask = ~0x06023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
@@ -484,7 +487,7 @@ State DecodeState(const QueueState& queue) {
     }
     zero(cx, 0x203, shaderControlMask(read(cx, 0x1c4)), "depth export, shader coverage or ordered fragment execution");
     zero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage");
-    zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
+    zero(cx, 0x2f8, AaConfigSamplesMask, "multisampling");
     zero(cx, 0x292, ScanModeMask, "scan conversion mode");
     zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
     zero(cx, 0x80, ~0u, "window offset");
@@ -714,7 +717,7 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
     ColorMetadataPass pass{mode == 2u ? ColorMetadataPass::Mode::EliminateFastClear : ColorMetadataPass::Mode::DccDecompress, {}};
     Require((control->second & ~0x70u) == 0xcc0000u, "CB metadata pass with a nonstandard ROP, dual quads disabled or degamma");
     Require((read(cx, 0x200) & 0xfu) == 0 && (read(cx, 0x0) & 0xfu) == 0, "CB metadata pass with depth or stencil work");
-    zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
+    zero(cx, 0x2f8, AaConfigSamplesMask, "multisampling");
     zero(cx, 0x80, ~0u, "window offset");
     const auto viewportControl = read(cx, 0x206);
     if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
@@ -775,7 +778,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     static_cast<void>(value(cx, 0x1c4, zFormat));
     if (auto reason = nonzero(cx, 0x203, shaderControlMask(zFormat), "depth export, shader coverage or ordered fragment execution"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage"); !reason.empty()) return reason;
-    if (auto reason = nonzero(cx, 0x2f8, ~0u, "multisampling or coverage conversion"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x2f8, AaConfigSamplesMask, "multisampling"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x292, ScanModeMask, "scan conversion mode"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;
