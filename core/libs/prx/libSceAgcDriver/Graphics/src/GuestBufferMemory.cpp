@@ -342,6 +342,14 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     }
     const auto alignment = context.hostImportAlignment;
     if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0 || state.failed.contains(base)) return nullptr;
+#ifdef _WIN32
+    decideImportWatch(context, state);
+    // Pinning Windows host memory can cause late driver writes to escape write-watch. Importing
+    // a watched allocation would therefore disable its stamps and force resident images to upload
+    // on every draw. Keep the copy path for these allocations; already untracked memory still
+    // benefits from imports and retains the conservative comparison policy.
+    if (state.unwatchImports && GuestMemory::Watched(base, static_cast<std::size_t>(bytes))) return nullptr;
+#endif
     // Pinned imports count against the driver's system memory budget; past it ordinary host
     // allocations fail, so imports stop at APS5_HOST_IMPORT_MIB (default 6 GiB, which covers the
     // registered memory of address-based shaders; past it they copy gigabytes per dispatch).

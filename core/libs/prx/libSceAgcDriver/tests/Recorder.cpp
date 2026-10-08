@@ -1693,6 +1693,43 @@ void importWatchTests(const Device& device) {
     const auto& context = device.GetContext();
 #ifdef _WIN32
     Require(PrepareImportWatch(context) == ImportWatch::Unwatch, "Windows host imports stayed watched by default");
+    if (context.hostImportAlignment != 0 && WriteWatched()) {
+        const auto unit = std::max<std::size_t>(65536, context.hostImportAlignment);
+        void* block = AllocateWatched(2 * unit, unit);
+        const auto address = reinterpret_cast<std::uint64_t>(block);
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Add(block, unit, true, true);
+            mutation.Add(static_cast<std::byte*>(block) + unit, unit, true, true);
+        }
+        struct Release {
+            const Context& context;
+            void* block;
+            std::size_t unit;
+            ~Release() {
+                {
+                    GuestAllocations::Mutation mutation;
+                    mutation.Remove(block);
+                    mutation.Remove(static_cast<std::byte*>(block) + unit);
+                }
+                HostImportFor(context, reinterpret_cast<std::uint64_t>(block), 2 * unit);
+                ReleaseWatched(block, 2 * unit);
+            }
+        } release{context, block, unit};
+        // Refusing an import must preserve unchanged proofs and still detect later CPU stores.
+        // An already untracked neighbour must remain eligible for a conservatively compared import.
+        std::memset(block, 0x11, 2 * unit);
+        const auto generation = CollectWritesUncached(address, unit);
+        Require(HostImportFor(context, address, unit) == nullptr, "a watched Windows allocation was imported");
+        Require(Watched(address, unit) && UnchangedSince(address, unit, generation), "refusing an import destroyed the unchanged proof");
+        static_cast<volatile std::uint8_t*>(block)[8] = 0x22;
+        CollectWritesUncached(address, unit);
+        Require(!UnchangedSince(address, unit, generation), "refusing an import hid a subsequent CPU store");
+        Unwatch(address + unit, unit);
+        const auto* imported = HostImportFor(context, address + unit, unit);
+        Require(imported != nullptr && imported->unwatched, "already untracked Windows memory lost its import path");
+        Require(Watched(address, unit), "importing an untracked neighbour disabled unrelated tracking");
+    }
     std::cout << "import watch decisions: Windows host imports use comparisons\n";
 #else
     if (context.hostImportAlignment == 0 || !WriteWatched()) {
