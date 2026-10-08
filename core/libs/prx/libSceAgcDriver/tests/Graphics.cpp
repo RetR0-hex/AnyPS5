@@ -115,6 +115,13 @@ void stateTests() {
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") != std::string::npos, "per-sample shading was accepted");
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "sample iteration");
     queue = makeState();
+    queue.context[0x2f8] = 0x00108001u;  // one sample, as Unity sets it
+    (void)AgcDriver::Graphics::DecodeState(queue);
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "a single-sample AA config was rejected");
+    queue.context[0x2f8] = 0x00108021u;  // four samples
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") != std::string::npos, "multisampling was accepted");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "multisampling");
+    queue = makeState();
     queue.userConfig.erase(0x24b);
     queue.context[0x2a5] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "user-config bank at DWORD 0x24b");
