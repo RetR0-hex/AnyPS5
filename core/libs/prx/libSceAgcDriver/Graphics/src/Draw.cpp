@@ -62,6 +62,7 @@ GuestTextureResource SurfaceForTarget(const ColorTarget& color) {
     surface.dstSelW = 7;
     surface.dccAddress = color.dccAddress;
     surface.dccAlphaOnMsb = color.dccAlphaOnMsb;
+    surface.samples = color.fragments;
     return surface;
 }
 
@@ -1486,6 +1487,7 @@ std::optional<std::string> KnownValidationFailure(const Context& context, std::s
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut) {
+    if (state.samples > 1) CaptureTrace::Log("msaa-draw samples=%u target=%llx", state.samples, static_cast<unsigned long long>(state.color.address));
     PerformanceTimer timing("Graphics.Draw");
     // APS5_PROFILE_DRAW prints the time of each phase of the draw (microseconds) and the [draws] totals.
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -1541,7 +1543,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto& color = binding.color;
         binding.gpuTiling = color.tileMode == ColorTileMode::RenderTarget && context.detiler != nullptr;
         APS5_LOG_OUT_DEBUG("Creating color target %zu address=0x%llx bytes=%llu extent=%ux%u", index, static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height);
-        const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes);
+        const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.fragments);
         constexpr VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         timer.phase(PhaseSetup);
         // Debug aid: APS5_NO_RESIDENT_TARGETS=1 copies every target in and out again.
@@ -1566,6 +1568,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice));
             continue;
         }
+        Require(color.samples == 1, "multisample draws require cached resident color targets");
         materializeCmaskClear(context, color, nullptr);
         Require(!color.mipTail, "rendering into a packed mip tail needs the resident image of its surface");
         Require(color.depth == 1, "rendering into a 3D color target needs the resident image of its surface");
@@ -2143,6 +2146,38 @@ std::shared_ptr<StorageTexture> metadataPassResident(const Context& context, con
 }
 
 void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass) {
+    if (pass.mode == ColorMetadataPass::Mode::Resolve) {
+        // Resolve directly between resident images. The destination joins normal pending writeback,
+        // so later sampled reads see the GPU result without a guest-memory roundtrip per resolve.
+        Require(pass.targets.size() == 2 && context.detiler != nullptr, "CB resolve requires two resident surfaces");
+        const auto& sourceColor = pass.targets[0];
+        const auto& destinationColor = pass.targets[1];
+        CaptureTrace::Log("msaa-resolve samples=%u source=%llx destination=%llx", sourceColor.samples, static_cast<unsigned long long>(sourceColor.address), static_cast<unsigned long long>(destinationColor.address));
+        auto source = CachedStorageSurface(context, SurfaceForTarget(sourceColor));
+        auto destination = CachedStorageSurface(context, SurfaceForTarget(destinationColor));
+        Require(source->Descriptor().samples > 1 && destination->Descriptor().samples == 1, "CB resolve image sample counts are invalid");
+        auto* recorder = Recorder::Active();
+        std::unique_ptr<CommandBatch> batch;
+        if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
+        const auto commands = recorder ? recorder->Commands() : batch->Handle();
+        imageBarrier(context, commands, source->Image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        imageBarrier(context, commands, destination->Image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageResolve region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent = {sourceColor.extent.width, sourceColor.extent.height, 1};
+        context.Function<PFN_vkCmdResolveImage>("vkCmdResolveImage")(commands, source->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        imageBarrier(context, commands, source->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+        imageBarrier(context, commands, destination->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+        if (recorder) {
+            recorder->Keep(source);
+            recorder->Keep(destination);
+            Recorder::CountBarriers(Recorder::CommandClass::Draw, 4);
+        } else batch->SubmitAndWait();
+        destination->MarkDirty();
+        MarkDccUncompressed(context, destinationColor.dccAddress, destinationColor.bytes);
+        return;
+    }
     for (const auto& color : pass.targets) {
         if (color.cmaskAddress != 0) {
             const auto resident = metadataPassResident(context, color);

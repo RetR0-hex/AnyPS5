@@ -521,8 +521,10 @@ void evictStorage(StorageTextureCache& cache, std::list<CachedStorageTexture>::i
 // Storage images are shared by every descriptor of one surface (address, extent, layers, format, tile
 // mode): the image holds the whole mip chain, and render targets in the same memory attach to it.
 std::array<std::uint32_t, 8> SurfaceKey(const Context& context, const GuestTextureResource& resource) {
+    // Sample count uses the free high bits of the layout word, preventing 1x/MSAA aliases from
+    // sharing a VkImage when a transient guest allocation is reused with a different AA mode.
     // Guest formats that store in the same Vulkan format share the image (views carry the difference).
-    return {static_cast<std::uint32_t>(resource.baseAddress), static_cast<std::uint32_t>(resource.baseAddress >> 32u), resource.width, resource.height, (resource.depthOrLastArray << 16u) | (resource.mipCount & 0xffffu), (static_cast<std::uint32_t>(resource.tileMode) << 12u) | (static_cast<std::uint32_t>(resource.dimension) << 20u), resource.baseArray, static_cast<std::uint32_t>(StorageFormatForGuest(context, resource.format))};
+    return {static_cast<std::uint32_t>(resource.baseAddress), static_cast<std::uint32_t>(resource.baseAddress >> 32u), resource.width, resource.height, (resource.depthOrLastArray << 16u) | (resource.mipCount & 0xffffu), (static_cast<std::uint32_t>(resource.tileMode) << 12u) | (static_cast<std::uint32_t>(resource.dimension) << 20u) | (resource.samples << 24u), resource.baseArray, static_cast<std::uint32_t>(StorageFormatForGuest(context, resource.format))};
 }
 
 struct ExtendedSurfaces {

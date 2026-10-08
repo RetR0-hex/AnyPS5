@@ -34,6 +34,15 @@ using AgcDriver::Graphics::Require;
 
 alignas(256) std::array<std::byte, 1024> colorMemory{};
 alignas(256) std::array<std::byte, 2048> sliceMemory{};
+std::array<std::byte, 196608> multisampleMemory{};
+
+void useMultisampleSurface(AgcDriver::Registers& context) {
+    // PE object files cannot express 64 KiB static alignment, so align inside a larger backing array.
+    const auto address = (reinterpret_cast<std::uintptr_t>(multisampleMemory.data()) + 65535u) & ~std::uintptr_t{65535u};
+    context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+    context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+    context[0x3b8] = 0x09c6c000u;
+}
 
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
@@ -105,6 +114,20 @@ void stateTests() {
     Require(state.color.address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.color.bytes == colorMemory.size(), "render-target address or size changed");
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
     Require(state.color.format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
+    auto multisampledColor = queue.context;
+    useMultisampleSurface(multisampledColor);
+    multisampledColor[0x31d] = 0x9000u; // 2 samples and 2 fragments in CB_COLOR_ATTRIB.
+    multisampledColor[0x292] = 3u;
+    multisampledColor[0x2f8] = 0x00100001u; // 2 MSAA samples and 2 exposed samples.
+    const auto decodedMultisampledColor = AgcDriver::Graphics::DecodeColorBuffer(multisampledColor, 0);
+    Require(decodedMultisampledColor.samples == 2 && decodedMultisampledColor.fragments == 2, "CB_COLOR_ATTRIB 2x sample/fragment fields were decoded incorrectly");
+    Require(decodedMultisampledColor.bytes == 65536, "multisampled color backing uses single-sample pitch");
+    const auto decodedAa = AgcDriver::Graphics::DecodeSampleConfiguration(multisampledColor);
+    Require(decodedAa.samples == 2 && decodedAa.exposedSamples == 2, "PA_SC_AA_CONFIG 2x sample fields were decoded incorrectly");
+    multisampledColor[0x31d] = 0x8000u;
+    expectFailure([&] { (void)AgcDriver::Graphics::DecodeColorBuffer(multisampledColor, 0); }, "fragment count exceeds the sample count");
+    multisampledColor[0x2f8] = 0x00400001u;
+    expectFailure([&] { (void)AgcDriver::Graphics::DecodeSampleConfiguration(multisampledColor); }, "exposed sample count exceeds");
     queue.userConfig[0x24b] = 1;
     queue.context[0x1b3] = 2;
     queue.context[0x1b4] = 2;
@@ -132,11 +155,21 @@ void stateTests() {
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "a single-sample AA config was rejected");
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("scan conversion") == std::string::npos, "MSAA_ENABLE rejected a single-sample draw");
     for (const auto logSamples : {1u, 2u, 3u, 4u}) {
+        useMultisampleSurface(queue.context);
         queue.context[0x2f8] = 0x00108000u | logSamples;
-        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") != std::string::npos, "multisampling was accepted");
-        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "multisampling");
+        queue.context[0x31d] = (logSamples << 12u) | (std::min(logSamples, 3u) << 15u);
+        if (logSamples <= 3) {
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "ordinary multisampling was rejected");
+            Require(AgcDriver::Graphics::DecodeState(queue).samples == (1u << logSamples), "rasterizer sample count changed");
+        } else {
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") != std::string::npos, "16x multisampling was accepted");
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "multisampling");
+        }
     }
     queue.context[0x292] = 2u; // MSAA disabled: the programmed sample count is inactive
+    queue.context[0x31d] = 0;
+    const auto singleSurface = makeState();
+    for (const auto reg : {0x318u, 0x390u, 0x3b8u}) queue.context[reg] = singleSurface.context.at(reg);
     (void)AgcDriver::Graphics::DecodeState(queue);
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "an inactive sample count was rejected");
     queue = makeState();
@@ -686,11 +719,20 @@ void DepthStencilTests() {
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
     Require(rejection.empty(), "precheck rejected a stencil draw with a surface: " + rejection);
     Require(state.depth && state.depth->address == 0x10000 && state.depth->stencilAddress == 0x20000 && state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT && state.depth->clearStencil == 7, "depth surface decode changed");
+    Require(state.depth->samples == 1, "single-sample depth surface was decoded incorrectly");
     Require(state.renderExtent.width == 4 && state.renderExtent.height == 2, "render extent ignores the depth surface");
     Require(!state.depthTest && !state.depthWrite && state.stencilTest, "depth/stencil enables changed");
     const auto& front = state.stencilFront;
     Require(front.compareOp == VK_COMPARE_OP_ALWAYS && front.passOp == VK_STENCIL_OP_INCREMENT_AND_CLAMP && front.failOp == VK_STENCIL_OP_KEEP && front.reference == 1 && front.writeMask == 0xff, "stencil mask pass changed");
     Require(std::memcmp(&state.stencilBack, &front, sizeof(front)) == 0, "back faces without BACKFACE_ENABLE must use the front state");
+    auto multisampled = queue;
+    useMultisampleSurface(multisampled.context);
+    multisampled.context[0x292] = 3u;
+    multisampled.context[0x2f8] = 0x00100001u;
+    multisampled.context[0x31d] = 0x9000u;
+    expectFailure([&] { (void)AgcDriver::Graphics::DecodeState(multisampled); }, "depth target and rasterizer sample counts differ");
+    multisampled.context[0x010] = 0xa0000187u; // DB_Z_INFO encodes 2x samples in bits 3:2.
+    Require(AgcDriver::Graphics::DecodeState(multisampled).depth->samples == 2, "matching 2x depth and raster samples were rejected");
     queue.context[0x10b] = 0;
     queue.context[0x10c] = 0x01ffff02;
     queue.context[0x200] = 0x00200211;
@@ -824,6 +866,15 @@ void metadataPassTests() {
     auto queue = makeState();
     queue.context[0x0] = 0;
     Require(!DecodeColorMetadataPass(queue).has_value(), "normal color rendering decoded as a metadata pass");
+    auto resolve = queue;
+    useMultisampleSurface(resolve.context);
+    resolve.context[0x202] = 0xcc0030;
+    resolve.context[0x31d] = 0x9000;
+    for (const auto pair : {std::pair{0x32cu, 0x31du}, {0x32bu, 0x31cu}, {0x32au, 0x31bu}, {0x3b1u, 0x3b0u}, {0x3b9u, 0x3b8u}}) resolve.context[pair.first] = resolve.context.at(pair.second);
+    resolve.context[0x327] = resolve.context.at(0x318) + 256u;
+    resolve.context[0x391] = resolve.context.at(0x390);
+    auto resolvedPass = DecodeColorMetadataPass(resolve);
+    Require(resolvedPass && resolvedPass->mode == ColorMetadataPass::Mode::Resolve && resolvedPass->targets.size() == 2 && resolvedPass->targets[0].samples == 2 && resolvedPass->targets[1].samples == 1, "CB resolve did not override inactive destination sample fields");
     queue.context[0x202] = 0xcc0020;
     queue.context[0x323] = 0x11223344;
     queue.context[0x324] = 0x55667788;
@@ -858,7 +909,7 @@ void metadataPassTests() {
     queue.context[0x202] = 0xcc0030;
     queue.context[0x1c5] = 9;
     queue.context[0x8f] = 0xf;
-    Require(!DecodeColorMetadataPass(queue).has_value(), "resolve decoded as a metadata pass");
+    expectFailure([&] { DecodeColorMetadataPass(queue); }, "missing register"); // MRT1 must be specified for a resolve.
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("mode resolve") != std::string::npos, "the resolve rejection does not name the mode");
 
     queue = makeState();

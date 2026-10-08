@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include <string>
 #include <algorithm>
 #include <bit>
@@ -377,6 +378,17 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
+    if (descriptor.samples > 1) {
+        // Stored samples enlarge tiled blocks and linear transfer planes, not the Vulkan pixel
+        // extent. Mip/array geometry needs slice XOR support before it can use this layout.
+        Require(descriptor.dimension == TextureDimension::k2D && descriptor.mipCount == 1 && descriptor.baseArray == 0 && descriptor.depthOrLastArray == 0 && descriptor.tileMode == TextureTileMode::kR64KBX, "unsupported multisample surface geometry");
+        const auto bpe = static_cast<std::uint32_t>(BytesPerElement(descriptor.format));
+        const ColorTargetLayout layout(descriptor.width, descriptor.height, ColorTileMode::RenderTarget, bpe, descriptor.samples);
+        geometry.guestBytes = geometry.layerBytes = layout.Bytes();
+        geometry.sliceLinearBytes = layout.LinearBytes();
+        geometry.mips.push_back({0, layout.Bytes(), 0, layout.LinearBytes(), descriptor.width, descriptor.height, layout.BlocksPerRow(), descriptor.width * bpe, false, 0, 0});
+        return geometry;
+    }
     if (descriptor.dimension == TextureDimension::k3D && (descriptor.tileMode == TextureTileMode::kZ64KBX || descriptor.tileMode == TextureTileMode::kD64KBX || descriptor.tileMode == TextureTileMode::kR64KBX)) {
         const auto depth = descriptor.depthOrLastArray + 1u;
         geometry.mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);

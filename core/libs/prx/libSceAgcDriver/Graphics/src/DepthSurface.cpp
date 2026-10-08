@@ -33,9 +33,15 @@ public:
             info.extent = {target.extent.width, target.extent.height, 1};
             info.mipLevels = 1;
             info.arrayLayers = 1;
-            info.samples = VK_SAMPLE_COUNT_1_BIT;
+            info.samples = static_cast<VkSampleCountFlagBits>(target.samples);
             info.tiling = VK_IMAGE_TILING_OPTIMAL;
             info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (target.samples > 1) {
+                Require(context.imageFormatProperties != nullptr, "missing multisample depth format query");
+                VkImageFormatProperties supported{};
+                Check(context.imageFormatProperties(context.physical, info.format, info.imageType, info.tiling, info.usage, 0, &supported), "vkGetPhysicalDeviceImageFormatProperties multisample depth");
+                Require((supported.sampleCounts & info.samples) != 0, "depth sample count is unsupported by this device");
+            }
             info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &image), "vkCreateImage depth");
@@ -81,6 +87,7 @@ public:
     DepthSurface& operator=(const DepthSurface&) = delete;
 
     std::shared_ptr<Texture> Sampled(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
+        Require(target.samples == 1, "multisampled depth cannot be bound as a single-sample texture");
         std::array<std::uint32_t, 12> key{};
         std::copy_n(words.begin(), std::min<std::size_t>(words.size(), 8), key.begin());
         key[8] = components.r;
@@ -126,7 +133,8 @@ private:
 };
 
 bool sameSurface(const DepthTarget& a, const DepthTarget& b) {
-    return a.address == b.address && a.stencilAddress == b.stencilAddress && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.format == b.format;
+    // Reused guest addresses can change AA mode; attaching the old sample count invalidates the pass.
+    return a.address == b.address && a.stencilAddress == b.stencilAddress && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.format == b.format && a.samples == b.samples;
 }
 
 std::mutex& surfacesMutex() {

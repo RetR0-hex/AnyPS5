@@ -38,6 +38,10 @@ struct ColorTarget {
     std::uint8_t componentMapping;
     ColorTileMode tileMode = ColorTileMode::Linear;
     std::uint32_t elementBytes = 4;
+    // Color attachment sample and fragment counts decoded from CB_COLOR_ATTRIB (log2 encoded).
+    // Coverage samples can differ from stored fragments with EQAA; native draws require equality.
+    std::uint32_t samples = 1;
+    std::uint32_t fragments = 1;
     // DCC metadata of a compressed target (CB_COLOR_INFO DCC_ENABLE), or 0 (see DccMetadata.hpp).
     std::uint64_t dccAddress = 0;
     bool dccAlphaOnMsb = false;
@@ -60,12 +64,21 @@ struct DepthTarget {
     std::uint64_t stencilAddress;
     VkExtent2D extent;
     VkFormat format;
+    std::uint32_t samples = 1;
     float clearDepth;
     std::uint8_t clearStencil;
 };
 
+struct SampleConfiguration {
+    // Counts are powers of two. Programmed AA fields are inactive when MSAA_ENABLE is clear.
+    std::uint32_t samples = 1;
+    std::uint32_t exposedSamples = 1;
+};
+
 struct State {
     ShaderStages stages;
+    std::uint32_t samples = 1;
+    std::uint32_t exposedSamples = 1;
     std::optional<DepthTarget> depth;
     bool depthTest = false;
     bool depthWrite = false;
@@ -105,9 +118,11 @@ std::array<std::uint8_t, 8> ExportMappings(const State& state);
 ColorTarget DecodeColorBuffer(const Registers& context, std::uint32_t slot);
 std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height);
 std::uint32_t ColorWriteMask(const Registers& context);
+SampleConfiguration DecodeSampleConfiguration(const Registers& context);
 
 struct ColorMetadataPass {
-    enum class Mode { EliminateFastClear, DccDecompress };
+    // Resolve carries MRT0 as source and MRT1 as destination, independent of export routing.
+    enum class Mode { EliminateFastClear, DccDecompress, Resolve };
     Mode mode;
     std::vector<ColorTarget> targets;
 };

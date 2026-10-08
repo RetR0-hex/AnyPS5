@@ -139,6 +139,8 @@ struct Context {
     bool imageInt64Atomics = false;
     bool geometryShader = false;
     bool sampleRateShading = false;
+    // Needed by sample-preserving image2DMS transfers; ordinary buffer/image copies require 1x.
+    bool shaderStorageImageMultisample = false;
     bool primitiveListRestart = false;
     bool imageViewMinLod = false;
     bool pipelineExecutableInfo = false;

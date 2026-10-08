@@ -22,6 +22,40 @@ void reject(TAction action) {
 }
 
 void RunColorTargetLayoutTests() {
+    const ColorTargetLayout msaa(129, 129, ColorTileMode::RenderTarget, 4, 2);
+    // Check independent AMD addresses before roundtrips: an incorrect bijection can roundtrip
+    // perfectly while disagreeing with the guest's sample locations.
+    Require(msaa.Offset(0, 0, 1) == 0x8000 && msaa.Offset(1, 0, 0) == 4 && msaa.Offset(0, 1, 0) == 16, "2x sample addressing differs from AMD pattern");
+    Require(msaa.Offset(64, 0) == 0x10400 && msaa.Offset(0, 128) == 3 * 65536 + 0x8000, "multisample block XOR lost high coordinate bits");
+    Require(msaa.Bytes() == 6 * 65536 && msaa.LinearBytes() == 129 * 129 * 4 * 2, "multisample backing size is incorrect");
+    reject([&] { msaa.Offset(0, 0, 2); });
+    reject([] { ColorTargetLayout(1, 1, ColorTileMode::Linear, 4, 2); });
+    reject([] { ColorTargetLayout(1, 1, ColorTileMode::RenderTarget, 4, 3); });
+    for (const auto samples : {2u, 4u, 8u}) {
+        for (const auto bpe : {1u, 2u, 4u, 8u, 16u}) {
+            const ColorTargetLayout surface(257, 259, ColorTileMode::RenderTarget, bpe, samples);
+            std::vector<bool> seen(surface.Bytes() / bpe);
+            std::vector<std::byte> linear(surface.LinearBytes());
+            std::vector<std::byte> tiled(surface.Bytes(), std::byte{0x5a});
+            std::vector<std::byte> restored(linear.size());
+            for (std::uint32_t sample = 0; sample < samples; ++sample) {
+                for (std::uint32_t y = 0; y < 259; ++y) {
+                    for (std::uint32_t x = 0; x < 257; ++x) {
+                        const auto offset = surface.Offset(x, y, sample);
+                        Require(offset % bpe == 0 && offset + bpe <= tiled.size() && !seen[offset / bpe], "multisample addresses alias or exceed backing memory");
+                        seen[offset / bpe] = true;
+                        for (std::uint32_t byte = 0; byte < bpe; ++byte) linear[((sample * 259u + y) * 257u + x) * bpe + byte] = std::byte((sample * 73u + y * 31u + x * 7u + byte) & 255u);
+                    }
+                }
+            }
+            surface.Tile(linear, tiled);
+            surface.Detile(tiled, restored);
+            Require(restored == linear, "multisample transfer lost sample data");
+            for (std::size_t element = 0; element < seen.size(); ++element) {
+                if (!seen[element]) for (std::uint32_t byte = 0; byte < bpe; ++byte) Require(tiled[element * bpe + byte] == std::byte{0x5a}, "multisample transfer changed padding");
+            }
+        }
+    }
     Require(DecodeColorTileMode(0x4dc6c000) == ColorTileMode::RenderTarget, "logged color descriptor was rejected");
     Require(DecodeColorTileMode(0x09000000) == ColorTileMode::Linear, "linear descriptor changed");
     reject([] { DecodeColorTileMode(0x4dc6c001); });

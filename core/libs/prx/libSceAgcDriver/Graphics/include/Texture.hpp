@@ -458,6 +458,8 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    // First upload transitions from UNDEFINED; subsequent uploads preserve the tracked GENERAL layout.
+    bool multisampleInitialized = false;
     std::uint32_t defaultMip = 0;
     std::map<std::uint32_t, VkImageView> extraViews;
     std::map<std::uint32_t, VkImageView> firstLayerViews;

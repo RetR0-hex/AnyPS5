@@ -192,6 +192,7 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool geometryShader = false;
     bool sampleRateShading = false;
+    bool shaderStorageImageMultisample = false;
     bool shaderClock = false;
     // VK_EXT_descriptor_indexing with non-uniform image array indexing (bindless image tables in
     // graphics stages, and compute workgroups wider than a wave).
@@ -948,9 +949,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.shaderResourceMinLod = available.shaderResourceMinLod;
     if (enabled.shaderResourceMinLod) state->capabilities.push_back(spv::CapabilityMinLod);
     enabled.sampleRateShading = available.sampleRateShading;
+    // Guest sample uploads/writeback use image2DMS storage operations. Keep this optional:
+    // unsupported devices still run single-sample paths and report the missing feature on use.
+    enabled.shaderStorageImageMultisample = available.shaderStorageImageMultisample;
     enabled.geometryShader = available.geometryShader;
     state->geometryShader = enabled.geometryShader == VK_TRUE;
     state->sampleRateShading = enabled.sampleRateShading == VK_TRUE;
+    state->shaderStorageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
     if (enabled.geometryShader) state->capabilities.push_back(spv::CapabilityGeometry);
     enabled.shaderClipDistance = available.shaderClipDistance;
     if (enabled.shaderStorageImageWriteWithoutFormat) state->capabilities.push_back(spv::CapabilityStorageImageWriteWithoutFormat);
@@ -2491,6 +2496,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.imageInt64Atomics = state->imageInt64Atomics;
     context.geometryShader = state->geometryShader;
     context.sampleRateShading = state->sampleRateShading;
+    context.shaderStorageImageMultisample = state->shaderStorageImageMultisample;
     context.primitiveListRestart = state->primitiveListRestart;
     context.imageViewMinLod = state->imageViewMinLod;
     context.pipelineExecutableInfo = state->pipelineExecutableInfo;

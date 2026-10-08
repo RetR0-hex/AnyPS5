@@ -46,6 +46,21 @@ add_custom_command(
         VERBATIM
 )
 
+# Multisample storage images cannot use Vulkan's buffer/image copy commands. Embed the
+# sample-preserving compute transfer in every runtime and standalone graphics test target.
+set(agcMultisampleTransferSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleTransfer.comp)
+set(agcMultisampleTransferSpv ${agcTextureDetileGeneratedDir}/MultisampleTransfer.spv)
+set(agcMultisampleTransferHeader ${agcTextureDetileGeneratedDir}/MultisampleTransfer_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleTransferHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleTransferSpv}" "${agcMultisampleTransferSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleTransferSpv} -DOUTPUT=${agcMultisampleTransferHeader}
+        -DSYMBOL=MULTISAMPLE_TRANSFER_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleTransferSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcMeshArgumentsShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MeshArguments.comp)
 set(agcMeshArgumentsShaderSpv ${agcTextureDetileGeneratedDir}/MeshArguments.spv)
 set(agcMeshArgumentsShaderHeader ${agcTextureDetileGeneratedDir}/MeshArguments_spv.h)
@@ -153,9 +168,11 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/UnitShadow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcMultisampleTransferHeader}
         ${agcMeshArgumentsShaderHeader}
         ${agcSampleCounterShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
@@ -494,11 +511,13 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/TextureTiling.cpp
         Graphics/src/TextureDetiler.cpp
         Graphics/src/Texture.cpp
+        Graphics/src/MultisampleTransfer.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp
         Graphics/src/Recorder.cpp
         Graphics/src/ShaderInputState.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcMultisampleTransferHeader}
         ${agcMeshArgumentsShaderHeader}
         ${agcSampleCounterShaderHeader}
         Execution/src/GuestMemory.cpp
@@ -681,9 +700,11 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/TextureTiling.cpp
             Graphics/src/TextureDetiler.cpp
             Graphics/src/Texture.cpp
+            Graphics/src/MultisampleTransfer.cpp
             Graphics/src/UnitShadow.cpp
             Graphics/src/Sampler.cpp
             ${agcTextureDetileShaderHeader}
+            ${agcMultisampleTransferHeader}
             ${visualShaders}
     )
 

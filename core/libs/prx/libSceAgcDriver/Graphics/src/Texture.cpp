@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTransfer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <array>
@@ -446,6 +447,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
 
 bool Texture::CanCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor) {
     const auto& from = source.Descriptor();
+    if (from.samples != 1 || descriptor.samples != 1) return false;
     if (IsBlockCompressed(descriptor.format) || IsBlockCompressed(from.format)) return false;
     // Same memory, same layout, same texel size: the GPU copy reinterprets the texels exactly as a
     // guest read through the sampled descriptor would.
@@ -685,6 +687,10 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         Require(mipLevel < descriptor.mipCount, "storage texture mip level is outside the texture");
         const auto vkFormat = StorageFormatFor(context, ResolveTextureFormat(descriptor.format));
         storageFormat = vkFormat;
+        if (descriptor.samples > 1) {
+            Require(context.shaderStorageImageMultisample, "device lacks multisample storage image support");
+            Require(vkFormat == VK_FORMAT_R8G8B8A8_UNORM, "multisample transfers currently require RGBA8 storage");
+        }
         APS5_LOG_OUT("StorageTexture address=0x%llx %ux%u mips=%u mip=%u layers=%u base=%u dim=%d tile=%d format=%u vk=%d", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, mipLevel,
                      descriptor.depthOrLastArray, descriptor.baseArray, static_cast<int>(descriptor.dimension), static_cast<int>(descriptor.tileMode), descriptor.format, static_cast<int>(vkFormat));
         geometry = DescribeSurface(descriptor);
@@ -698,7 +704,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         const bool layered = geometry.layers >= 2 && !geometry.thick && geometry.imageDepth == 1 && geometry.layers == geometry.imageLayers && geometry.layerBytes * geometry.layers == guestBytes && geometry.layerBytes % 65536 == 0 && descriptor.baseAddress % 65536 == 0;
         // Tile blocks divide the stamp blocks, so at an aligned base every unit is whole tile blocks
         // of its (layer, mip) slices (sliceWindows).
-        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0;
+        blockUnits = descriptor.samples == 1 && LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0;
         trackedLayers = blockUnits ? static_cast<std::uint32_t>((guestBytes + 65535) / 65536) : layered && LayerTrackingEnabled() ? geometry.layers : 1u;
         trackedLayerBytes = blockUnits ? 65536 : guestBytes / trackedLayers;
         layerGeneration.assign(trackedLayers, 0);
@@ -714,7 +720,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         imageInfo.extent = {descriptor.width, descriptor.height, geometry.imageDepth};
         imageInfo.mipLevels = descriptor.mipCount;
         imageInfo.arrayLayers = geometry.imageLayers;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.samples = static_cast<VkSampleCountFlagBits>(descriptor.samples);
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         {
@@ -725,6 +731,12 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         }
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (descriptor.samples > 1) {
+            Require(context.imageFormatProperties != nullptr, "missing multisample color format query");
+            VkImageFormatProperties supported{};
+            Check(context.imageFormatProperties(context.physical, imageInfo.format, imageInfo.imageType, imageInfo.tiling, imageInfo.usage, imageInfo.flags, &supported), "multisample color image format query");
+            Require((supported.sampleCounts & imageInfo.samples) != 0, "color sample count is unsupported by this device");
+        }
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage storage");
         VkMemoryRequirements requirements{};
         context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
@@ -733,10 +745,11 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory storage texture");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory storage");
+        if (descriptor.samples > 1) view = createView(mipLevel, false, storageFormat);
         uploadReason = "first";
         upload();
         defaultMip = mipLevel;
-        view = createView(mipLevel, false, storageFormat);
+        if (view == VK_NULL_HANDLE) view = createView(mipLevel, false, storageFormat);
         {
             auto& live = Live();
             std::lock_guard lock(live.mutex);
@@ -1305,7 +1318,7 @@ bool StorageTexture::Refresh() {
         }
         // Only the direct path uploads the selected layers alone (see upload); the others replace
         // the whole image, so every pending layer's results are stored first.
-        direct = keys == DccKeys::Uncompressed && HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr;
+        direct = descriptor.samples == 1 && keys == DccKeys::Uncompressed && HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr;
         if (alias != nullptr && direct) {
             // The alias's pending units that nothing stamped since its generation (a CPU store or a
             // driver store there wins over its results, as at its own write-back) are taken from
@@ -1497,6 +1510,22 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     };
     uploadedKeys = ProvedClearKeys(descriptor, guestBytes, keyProof);
     filledKeys = DccKeys::Uncompressed;
+    if (descriptor.samples > 1) {
+        GuestMemory::ReadCommitted(descriptor.baseAddress, original);
+        // Upload only when the normal cache refresh proves guest bytes or clear keys changed.
+        // Native draws reuse the image; this synchronized transfer is not paid per draw.
+        Buffer staging(context, original.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (uploadedKeys == DccKeys::Uncompressed) std::memcpy(staging.Bytes().data(), original.data(), original.size());
+        else Require(FillDccClear(storageFormat, uploadedKeys, descriptor.dccAlphaOnMsb, staging.Bytes()), "unsupported multisample DCC clear encoding");
+        TransferMultisampleColor(context, image, view, staging, descriptor.width, descriptor.height, descriptor.samples, true, multisampleInitialized);
+        multisampleInitialized = true;
+        originalValid = uploadedKeys == DccKeys::Uncompressed;
+        forgetBorrowed(0, trackedLayers);
+        stampLayers(false);
+        ++version;
+        countStorageUpload(2, guestBytes);
+        return;
+    }
     VkClearColorValue clearValue{};
     if (IsDccClear(uploadedKeys) && ClearColorFor(storageFormat, uploadedKeys, clearValue)) {
         // A fast-cleared surface is cleared on the GPU; its texel memory is neither read nor filled.
@@ -3475,6 +3504,29 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         emptyWriteBacks.fetch_add(1, std::memory_order_relaxed);
         originalValid = false;
         settle(true);
+        return;
+    }
+    if (descriptor.samples > 1) {
+        const bool wasValid = originalValid;
+        // Read every sample but store only the ranges selected by the existing CPU-write conflict
+        // rules. Seed padding from the guest snapshot because the compute shader writes texels only.
+        if (!wasValid) GuestMemory::ReadCommitted(descriptor.baseAddress, original);
+        Buffer staging(context, original.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        std::memcpy(staging.Bytes().data(), original.data(), original.size());
+        TransferMultisampleColor(context, image, view, staging, descriptor.width, descriptor.height, descriptor.samples, false, true);
+        staging.Invalidate();
+        const auto current = staging.Bytes();
+        for (const auto& [from, to] : keep) {
+            const auto offset = static_cast<std::size_t>(from - descriptor.baseAddress);
+            const auto length = static_cast<std::size_t>(to - from);
+            GuestMemory::WriteChangedCommitted(from, current.subspan(offset, length), std::span<const std::byte>(original).subspan(offset, length));
+            std::memcpy(original.data() + offset, current.data() + offset, length);
+        }
+        if (!IsDccClear(filledKeys)) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
+        uploadedKeys = DccKeys::Uncompressed;
+        originalValid = !skippedAny && (wasValid || std::all_of(layers.begin(), layers.end(), [](bool selected) { return selected; }));
+        countStorageWriteBack(guestBytes, false);
+        settle(false);
         return;
     }
     if (const auto* import = HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {

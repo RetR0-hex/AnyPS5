@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleSwizzleEquations.hpp"
 #include <bit>
 #include <cstring>
 #include <limits>
@@ -54,7 +55,40 @@ namespace {
 struct SwizzleTables {
     std::vector<std::uint32_t> x;
     std::vector<std::uint32_t> y;
+    std::vector<std::uint32_t> samples;
 };
+
+const SwizzleTables& multisampleTables(std::uint32_t bytesPerElement, std::uint32_t samples) {
+    // XOR is separable by coordinate. Build the small periodic tables once rather than evaluating
+    // sixteen parity equations for every sample in every CPU layout transfer.
+    static std::once_flag once[3][5];
+    static SwizzleTables tables[3][5];
+    const auto sampleIndex = std::countr_zero(samples) - 1u;
+    const auto elementIndex = std::countr_zero(bytesPerElement);
+    std::call_once(once[sampleIndex][elementIndex], [&] {
+        const MultisampleSwizzleEquation* equation = nullptr;
+        for (const auto& candidate : MultisampleSwizzleEquations) {
+            if (candidate.samples == samples && candidate.elementBytes == bytesPerElement) equation = &candidate;
+        }
+        require(equation != nullptr, "AGC graphics: missing multisample swizzle equation");
+        std::uint64_t used = 0;
+        for (const auto mask : equation->bits) used |= mask;
+        auto& table = tables[sampleIndex][elementIndex];
+        table.x.resize(1u << std::bit_width(static_cast<std::uint32_t>(used & 0xffffu)));
+        table.y.resize(1u << std::bit_width(static_cast<std::uint32_t>((used >> 16u) & 0xffffu)));
+        table.samples.resize(samples);
+        const auto fill = [&](auto& offsets, std::uint32_t shift) {
+            for (std::uint32_t coordinate = 0; coordinate < offsets.size(); ++coordinate) {
+                const auto packed = static_cast<std::uint64_t>(coordinate) << shift;
+                for (std::uint32_t bit = 0; bit < 16u; ++bit) offsets[coordinate] |= (static_cast<std::uint32_t>(std::popcount(packed & equation->bits[bit])) & 1u) << bit;
+            }
+        };
+        fill(table.x, 0);
+        fill(table.y, 16);
+        fill(table.samples, 48);
+    });
+    return tables[sampleIndex][elementIndex];
+}
 
 const SwizzleTables& renderTargetTables(std::uint32_t bytesPerElement, std::uint32_t blockWidth, std::uint32_t blockHeight) {
     static std::once_flag once[5];
@@ -96,9 +130,11 @@ const SwizzleTables& standardTables(std::uint32_t bytesPerElement, std::uint32_t
 
 }
 
-ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t bytesPerElement) : width(width), height(height), pitch(width), mode(mode), bytes(0), elementBytes(bytesPerElement) {
+ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t bytesPerElement, std::uint32_t samples) : width(width), height(height), pitch(width), mode(mode), bytes(0), elementBytes(bytesPerElement), samples(samples) {
     require(width != 0 && height != 0 && width <= 16384 && height <= 16384, "AGC graphics: invalid color surface extent");
     require(std::has_single_bit(bytesPerElement) && bytesPerElement <= 16u, "AGC graphics: unsupported color element size");
+    require(std::has_single_bit(samples) && samples <= 8u, "AGC graphics: unsupported stored color sample count");
+    require(samples == 1 || mode == ColorTileMode::RenderTarget, "AGC graphics: multisampled color requires SW_64KB_R_X");
     std::uint32_t paddedHeight = height;
     switch (mode) {
         case ColorTileMode::Linear: {
@@ -107,15 +143,27 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
             break;
         }
         case ColorTileMode::RenderTarget: {
-            // SW_64KB_R_X: 64 KiB blocks of 2^(16 - log2(bpe)) elements, wider than tall for odd powers.
-            const auto log2Elements = 16u - static_cast<std::uint32_t>(std::countr_zero(bytesPerElement));
-            blockWidth = 1u << ((log2Elements + 1u) / 2u);
-            blockHeight = 1u << (log2Elements / 2u);
+            // Each 64 KiB block holds all stored samples. AMD's odd sample exponent changes which
+            // side gets the extra coordinate bit (RGBA8 2x is 64x128, not a wider 1x texel).
+            const auto log2Samples = static_cast<std::uint32_t>(std::countr_zero(samples));
+            const auto log2Elements = 16u - static_cast<std::uint32_t>(std::countr_zero(bytesPerElement)) - log2Samples;
+            const auto log2Width = (log2Elements + ((log2Samples & 1u) == 0 ? 1u : 0u)) / 2u;
+            blockWidth = 1u << log2Width;
+            blockHeight = 1u << (log2Elements - log2Width);
             pitch = (width + blockWidth - 1u) / blockWidth * blockWidth;
             paddedHeight = (height + blockHeight - 1u) / blockHeight * blockHeight;
-            const auto& tables = renderTargetTables(bytesPerElement, blockWidth, blockHeight);
-            xOffsets = tables.x.data();
-            yOffsets = tables.y.data();
+            if (samples == 1) {
+                const auto& tables = renderTargetTables(bytesPerElement, blockWidth, blockHeight);
+                xOffsets = tables.x.data();
+                yOffsets = tables.y.data();
+            } else {
+                const auto& tables = multisampleTables(bytesPerElement, samples);
+                xOffsets = tables.x.data();
+                yOffsets = tables.y.data();
+                sampleOffsets = tables.samples.data();
+                xPeriod = static_cast<std::uint32_t>(tables.x.size());
+                yPeriod = static_cast<std::uint32_t>(tables.y.size());
+            }
             break;
         }
         case ColorTileMode::Standard4KB:
@@ -134,35 +182,43 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
         }
         default: throw std::runtime_error("AGC graphics: unsupported color tile mode");
     }
-    const auto size = static_cast<std::uint64_t>(pitch) * paddedHeight * bytesPerElement;
+    const auto size = static_cast<std::uint64_t>(pitch) * paddedHeight * bytesPerElement * samples;
     require(size <= std::numeric_limits<std::size_t>::max(), "AGC graphics: color surface size overflow");
     bytes = static_cast<std::size_t>(size);
 }
 
-std::size_t ColorTargetLayout::offset(std::uint32_t x, std::uint32_t y) const {
+std::size_t ColorTargetLayout::offset(std::uint32_t x, std::uint32_t y, std::uint32_t sample) const {
     if (mode == ColorTileMode::Linear) return (static_cast<std::size_t>(y) * pitch + x) * elementBytes;
     const auto block = static_cast<std::size_t>(y / blockHeight) * (pitch / blockWidth) + x / blockWidth;
+    if (sampleOffsets) {
+        // Coordinates above the block dimensions participate in the pipe XOR.
+        return block * Alignment() + (xOffsets[x & (xPeriod - 1u)] ^ yOffsets[y & (yPeriod - 1u)] ^ sampleOffsets[sample]);
+    }
     return block * Alignment() + (xOffsets[x % blockWidth] ^ yOffsets[y % blockHeight]);
 }
 
-std::size_t ColorTargetLayout::Offset(std::uint32_t x, std::uint32_t y) const {
-    require(x < width && y < height, "AGC graphics: color surface coordinate out of range");
-    return offset(x, y);
+std::size_t ColorTargetLayout::Offset(std::uint32_t x, std::uint32_t y, std::uint32_t sample) const {
+    require(x < width && y < height && sample < samples, "AGC graphics: color surface coordinate out of range");
+    return offset(x, y, sample);
 }
 
 void ColorTargetLayout::Detile(std::span<const std::byte> source, std::span<std::byte> destination) const {
     require(source.size() == Bytes() && destination.size() == LinearBytes(), "AGC graphics: color detile buffer size mismatch");
-    for (std::uint32_t y = 0; y < height; ++y) {
-        auto* row = destination.data() + static_cast<std::size_t>(y) * width * elementBytes;
-        for (std::uint32_t x = 0; x < width; ++x) std::memcpy(row + static_cast<std::size_t>(x) * elementBytes, source.data() + offset(x, y), elementBytes);
+    for (std::uint32_t sample = 0; sample < samples; ++sample) {
+      for (std::uint32_t y = 0; y < height; ++y) {
+        auto* row = destination.data() + (static_cast<std::size_t>(sample) * height + y) * width * elementBytes;
+        for (std::uint32_t x = 0; x < width; ++x) std::memcpy(row + static_cast<std::size_t>(x) * elementBytes, source.data() + offset(x, y, sample), elementBytes);
+      }
     }
 }
 
 void ColorTargetLayout::Tile(std::span<const std::byte> source, std::span<std::byte> destination) const {
     require(source.size() == LinearBytes() && destination.size() == Bytes(), "AGC graphics: color tile buffer size mismatch");
-    for (std::uint32_t y = 0; y < height; ++y) {
-        const auto* row = source.data() + static_cast<std::size_t>(y) * width * elementBytes;
-        for (std::uint32_t x = 0; x < width; ++x) std::memcpy(destination.data() + offset(x, y), row + static_cast<std::size_t>(x) * elementBytes, elementBytes);
+    for (std::uint32_t sample = 0; sample < samples; ++sample) {
+      for (std::uint32_t y = 0; y < height; ++y) {
+        const auto* row = source.data() + (static_cast<std::size_t>(sample) * height + y) * width * elementBytes;
+        for (std::uint32_t x = 0; x < width; ++x) std::memcpy(destination.data() + offset(x, y, sample), row + static_cast<std::size_t>(x) * elementBytes, elementBytes);
+      }
     }
 }
 

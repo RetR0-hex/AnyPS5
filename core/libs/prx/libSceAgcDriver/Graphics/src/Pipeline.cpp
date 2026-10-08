@@ -97,7 +97,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     this->context.bufferPool.reset();
     Require(state.blends.size() == (state.colors.empty() ? 0u : state.colors.back().exportIndex + 1u) && state.colors.size() <= state.blends.size(), "blend states do not match decoded color state");
     Require(state.blends.size() <= context.limits.maxColorAttachments, "color targets exceed device attachment limits");
-    Require(state.hasColorTarget || (context.limits.framebufferNoAttachmentsSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0, "device does not support single-sample rendering without attachments");
+    Require(state.hasColorTarget || state.depth || (context.limits.framebufferNoAttachmentsSampleCounts & state.samples) != 0, "device does not support the sample count without attachments");
     Require(!depthBounds || context.depthBounds, "device does not support the depth bounds test");
     Require(!depthBias || state.depthBiasClamp == 0.0f || context.depthBiasClamp, "device does not support depth bias clamping");
     Require(!state.negativeOneToOne || context.depthClipControl, "negative-one-to-one depth clipping requires VK_EXT_depth_clip_control with depthClipControl enabled");
@@ -144,7 +144,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         for (std::uint32_t index = 0; index < state.colors.size(); ++index) {
             VkAttachmentDescription color{};
             color.format = state.colors[index].format;
-            color.samples = VK_SAMPLE_COUNT_1_BIT;
+            color.samples = static_cast<VkSampleCountFlagBits>(state.colors[index].samples);
             color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -162,7 +162,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         if (state.depth) {
             VkAttachmentDescription depth{};
             depth.format = state.depth->format;
-            depth.samples = VK_SAMPLE_COUNT_1_BIT;
+            depth.samples = static_cast<VkSampleCountFlagBits>(state.depth->samples);
             depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -209,7 +209,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         raster.depthBiasEnable = depthBias;
         raster.lineWidth = 1;
         VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-        samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        samples.rasterizationSamples = static_cast<VkSampleCountFlagBits>(state.samples);
         VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
         depthStencil.depthTestEnable = state.depthTest;
         depthStencil.depthWriteEnable = state.depthWrite;
@@ -397,6 +397,8 @@ std::vector<std::byte> pipelineKey(const Context& context, const State& state, c
     append(key, resources.LayoutKey().size());
     for (const auto word : resources.LayoutKey()) append(key, word);
     append(key, state.hasColorTarget);
+    append(key, state.samples);
+    // Render-pass sample counts are immutable; reuse across AA modes would bind incompatible images.
     append(key, state.rectList);
     append(key, state.topology);
     append(key, state.primitiveRestart);
@@ -408,13 +410,17 @@ std::vector<std::byte> pipelineKey(const Context& context, const State& state, c
     for (const auto& blend : state.blends) append(key, blend);
     for (const auto value : state.blendConstants) append(key, value);
     append(key, state.colors.size());
-    for (const auto& color : state.colors) append(key, color.format);
+    for (const auto& color : state.colors) {
+        append(key, color.format);
+        append(key, color.samples);
+    }
     if (state.blends.size() != state.colors.size()) {
         for (const auto& color : state.colors) append(key, color.exportIndex);
     }
     append(key, state.depth.has_value());
     if (state.depth) {
         append(key, state.depth->format);
+        append(key, state.depth->samples);
         append(key, state.depthTest);
         append(key, state.depthWrite);
         append(key, state.depthCompare);

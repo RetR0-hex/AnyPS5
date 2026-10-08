@@ -83,6 +83,9 @@ struct GuestTextureResource {
     bool dccAlphaOnMsb = false;
     std::uint32_t minLod = 0;
     std::uint32_t allocatedMipCount = 0;
+    // Stored color samples; raster coverage samples are carried by ColorTarget separately.
+    // This participates in surface cache identity even when address and pixel format match.
+    std::uint32_t samples = 1;
 };
 
 float EffectiveMinLod(const GuestTextureResource& resource);
