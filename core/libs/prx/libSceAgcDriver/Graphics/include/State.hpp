@@ -76,6 +76,7 @@ struct State {
     float depthBiasSlope = 0.0f;
     float depthBiasClamp = 0.0f;
     bool stencilTest = false;
+    bool clearStencil = false;
     VkStencilOpState stencilFront{};
     VkStencilOpState stencilBack{};
     ColorTarget color;

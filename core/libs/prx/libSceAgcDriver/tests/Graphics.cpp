@@ -565,6 +565,10 @@ void DepthStencilTests() {
     queue.context[0x200] = 0x00700711;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil add/subtract");
     queue.context[0x10b] = 0;
+    queue.context[0x000] = 0x22;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.clearStencil && state.depth && state.depth->clearStencil == 7, "DB_RENDER_CONTROL stencil clear was not decoded");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "precheck rejected a stencil-clear draw");
     queue.context[0x000] = 1;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DB_RENDER_CONTROL");
     queue = makeState();

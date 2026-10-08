@@ -65,6 +65,7 @@ struct DeviceFunctions {
     PFN_vkCmdCopyBufferToImage cmdCopyBufferToImage = nullptr;
     PFN_vkCmdCopyImageToBuffer cmdCopyImageToBuffer = nullptr;
     PFN_vkCmdClearColorImage cmdClearColorImage = nullptr;
+    PFN_vkCmdClearAttachments cmdClearAttachments = nullptr;
     PFN_vkUpdateDescriptorSets updateDescriptorSets = nullptr;
     PFN_vkAllocateDescriptorSets allocateDescriptorSets = nullptr;
     PFN_vkGetFenceStatus getFenceStatus = nullptr;

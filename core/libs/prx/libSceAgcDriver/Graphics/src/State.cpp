@@ -69,6 +69,9 @@ constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 // PA_SC_AA_CONFIG.MSAA_NUM_SAMPLES; the other fields (centroid mask, sample distance,
 // exposed samples) only take effect with more than one sample (Unity sets them anyway).
 constexpr std::uint32_t AaConfigSamplesMask = 0x70u;
+// DB_RENDER_CONTROL: stencil clear is emitted with vkCmdClearAttachments; disabling stencil
+// compression only changes the guest GPU's internal representation, which Vulkan manages itself.
+constexpr std::uint32_t DbRenderControlUnsupportedMask = 0x00001f9du;
 constexpr std::uint32_t ScanModeMask = ~2u;
 constexpr std::uint32_t ScanControlMask = ~0x06023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
@@ -158,7 +161,8 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
 }
 
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
-    zero(cx, 0x000, 0x00001f9fu, "depth/stencil clear, copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    zero(cx, 0x000, DbRenderControlUnsupportedMask, "depth/stencil clear, copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
     zero(cx, 0x002, 0x3c000000u, "depth mips (DB_DEPTH_VIEW MIP_LEVEL)");
     zero(cx, 0x010, 0x000f100cu, "multisampled, partially resident or mipmapped depth (DB_Z_INFO)");
@@ -189,6 +193,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
     result.depth = depth;
+    result.clearStencil = stencil && stencilClear;
     result.depthTest = (depthControl & 2u) != 0;
     result.depthWrite = result.depthTest && (depthControl & 4u) != 0 && !depthReadOnly;
     result.depthCompare = static_cast<VkCompareOp>((depthControl >> 4u) & 7u);
@@ -465,7 +470,9 @@ State DecodeState(const QueueState& queue) {
     zero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports");
     {
         const auto depthControl = read(cx, 0x200);
-        if ((depthControl & 0xbu) != 0 && depthSurfaceBound(cx)) {
+        const auto renderControl = find(cx, 0x000);
+        const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0;
+        if (((depthControl & 0xbu) != 0 || stencilClear) && depthSurfaceBound(cx)) {
             decodeDepth(cx, depthControl, result);
         } else if (depthPassThrough(depthControl) || ((depthControl & 3u) != 0 && depthPlanesAbsent(cx))) {
             static bool reported = false;
