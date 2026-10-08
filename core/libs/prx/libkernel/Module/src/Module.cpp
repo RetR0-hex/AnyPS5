@@ -1,6 +1,9 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include "SceTypes.hpp"
@@ -75,11 +78,48 @@ void FillGuestUnwindInfo(const std::uint8_t* base, ModuleInfoForUnwind* info) {
 extern "C" {
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name);
+char* APS5_VABI dlerror_nid_postfix();
 int APS5_VABI dlclose_nid_postfix(void* handle);
 }
 
 namespace {
 constexpr int kRtldNow = 2;
+constexpr char kGuestStartExport[] = "__aps5_guest_start";
+using GuestInit = int (APS5_VABI*)(size_t, const void*, void*);
+using GuestInitArrayEntry = void (APS5_VABI*)(int, char**, char**);
+
+int StartDeferredModule(void* handle, size_t args, const void* argp) {
+ const auto* table = static_cast<const std::uint32_t*>(dlsym_nid_postfix(handle, kGuestStartExport));
+ if (!table) {
+  dlerror_nid_postfix();
+  return 0;
+ }
+ static std::mutex mutex;
+ static std::set<const void*> started;
+ {
+  std::lock_guard lock(mutex);
+  if (!started.insert(table).second) return 0;
+ }
+#ifdef _WIN32
+ HMODULE module = nullptr;
+ if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(table), &module))
+  throw std::runtime_error("sceKernelLoadStartModule: cannot find the module of a start table");
+ const auto base = reinterpret_cast<std::uintptr_t>(module);
+#else
+ (void)args;
+ (void)argp;
+ throw std::runtime_error("sceKernelLoadStartModule: start-on-load modules are only produced for Windows");
+ const std::uintptr_t base = 0;
+#endif
+ int result = 0;
+ if (table[0] != 0) result = reinterpret_cast<GuestInit>(base + table[0])(args, argp, nullptr);
+ for (std::uint32_t index = 0; index < table[1]; ++index) {
+  const auto entry = *reinterpret_cast<GuestInitArrayEntry*>(base + table[2 + index]);
+  if (entry) entry(0, nullptr, nullptr);
+ }
+ return result;
+}
 }
 
 extern "C" {
@@ -188,14 +228,16 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
 }
 
 KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, size_t args, const void* argp, uint32_t flags, const KernelLoadModuleOpt* opt, int* res) {
- (void)args;
- (void)argp;
  (void)flags;
  (void)opt;
  if (res) *res = 0;
  if (!module_file_name) return static_cast<KernelModule>(SCE_KERNEL_ERROR_EFAULT);
  void* handle = dlopen_nid_postfix(module_file_name, kRtldNow);
- if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
+ if (!handle) {
+  return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
+ }
+ const int started = StartDeferredModule(handle, args, argp);
+ if (res) *res = started;
  return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
 }
 

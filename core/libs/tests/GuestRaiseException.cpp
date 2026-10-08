@@ -30,6 +30,7 @@ static void Require(bool value) { if (!value) std::abort(); }
 
 static std::atomic<int> calls{0};
 static std::atomic<std::thread::id> handlerThread;
+static std::atomic<Pthread> handlerGuestThread{nullptr};
 static std::atomic<std::uint64_t> handlerRsp{0};
 static std::atomic<std::uintptr_t> handlerFrame{0};
 
@@ -41,6 +42,7 @@ static void APS5_VABI Handler(int signum, void* context) {
     handlerFrame.store(reinterpret_cast<std::uintptr_t>(&local));
     handlerRsp.store(rsp);
     handlerThread.store(std::this_thread::get_id());
+    handlerGuestThread.store(scePthreadSelf());
     calls.fetch_add(1);
 }
 
@@ -109,11 +111,15 @@ static void* APS5_VABI Finished(void*) {
     return nullptr;
 }
 
-static void ExpectDelivery(int before, std::thread::id thread) {
+static void ExpectDelivery(int before, std::thread::id thread, Pthread guestThread, bool nativeDelivery = true) {
     for (int attempt = 0; attempt < 5000 && calls.load() == before; ++attempt) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     Require(calls.load() == before + 1);
-    Require(handlerThread.load() == thread);
-    Require(handlerRsp.load() != 0 && handlerFrame.load() < handlerRsp.load());
+    Require(handlerGuestThread.load() == guestThread);
+    Require(handlerRsp.load() != 0);
+    if (nativeDelivery) {
+        Require(handlerThread.load() == thread);
+        Require(handlerFrame.load() < handlerRsp.load());
+    }
 }
 
 int main() {
@@ -136,7 +142,7 @@ int main() {
     while (!busy.started.load()) std::this_thread::yield();
     for (int raised = 0; raised < Repeats; ++raised) {
         Require(sceKernelRaiseException(busyThread, SIGUSR1) == 0);
-        ExpectDelivery(1 + raised, busy.id);
+        ExpectDelivery(1 + raised, busy.id, busyThread);
     }
     busy.stop.store(true);
     Require(scePthreadJoin(busyThread, nullptr) == 0);
@@ -149,7 +155,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     for (int raised = 0; raised < Repeats; ++raised) {
         Require(sceKernelRaiseException(waitingThread, SIGUSR1) == 0);
-        ExpectDelivery(1 + Repeats + raised, waiting.id);
+        ExpectDelivery(1 + Repeats + raised, waiting.id, waitingThread);
     }
     Require(sceKernelSignalSema(waiting.sem, 1) == 0);
     Require(scePthreadJoin(waitingThread, nullptr) == 0);
@@ -164,8 +170,8 @@ int main() {
         while (!blocked.started.load()) std::this_thread::yield();
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         Require(sceKernelRaiseException(blockedThread, SIGUSR1) == 0);
+        ExpectDelivery(1 + 2 * Repeats + round, blocked.id, blockedThread, false);
         hostLock.unlock();
-        ExpectDelivery(1 + 2 * Repeats + round, blocked.id);
         while (hostAcquired.load() != round + 1) std::this_thread::yield();
         hostLock.lock();
         blocked.started.store(false);
@@ -185,7 +191,7 @@ int main() {
         Require(sceKernelSignalSema(leaving.sem, 1) == 0);
         for (int spin = 0; spin < round % 16 * 64; ++spin) std::this_thread::yield();
         Require(sceKernelRaiseException(leavingThread, SIGUSR1) == 0);
-        ExpectDelivery(1 + 2 * Repeats + HostRounds + round, leaving.id);
+        ExpectDelivery(1 + 2 * Repeats + HostRounds + round, leaving.id, leavingThread, false);
         leavingRound.store(round + 1);
     }
     Require(scePthreadJoin(leavingThread, nullptr) == 0);

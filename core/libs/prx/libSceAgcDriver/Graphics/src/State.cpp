@@ -69,11 +69,11 @@ constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 // PA_SC_AA_CONFIG.MSAA_NUM_SAMPLES; the other fields (centroid mask, sample distance,
 // exposed samples) only take effect with more than one sample (Unity sets them anyway).
-constexpr std::uint32_t AaConfigSamplesMask = 0x70u;
+constexpr std::uint32_t AaConfigSamplesMask = 0x7u;
 // DB_RENDER_CONTROL: stencil clear is emitted with vkCmdClearAttachments; disabling stencil
 // compression only changes the guest GPU's internal representation, which Vulkan manages itself.
 constexpr std::uint32_t DbRenderControlUnsupportedMask = 0x00001f9du;
-constexpr std::uint32_t ScanModeMask = ~2u;
+constexpr std::uint32_t ScanModeMask = ~3u;
 constexpr std::uint32_t ScanControlMask = ~0x06023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
 // Bits 26/27 (ZCLIP_NEAR/FAR_DISABLE) become depth clamping; bit 19 selects the [0, 1] clip space.
@@ -496,7 +496,7 @@ State DecodeState(const QueueState& queue) {
     }
     zero(cx, 0x203, shaderControlMask(read(cx, 0x1c4)), "depth export, shader coverage or ordered fragment execution");
     zero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage");
-    zero(cx, 0x2f8, AaConfigSamplesMask, "multisampling");
+    zero(cx, 0x2f8, (read(cx, 0x292) & 1u) != 0 ? AaConfigSamplesMask : 0u, "multisampling");
     zero(cx, 0x292, ScanModeMask, "scan conversion mode");
     zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
     zero(cx, 0x80, ~0u, "window offset");
@@ -812,7 +812,9 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     static_cast<void>(value(cx, 0x1c4, zFormat));
     if (auto reason = nonzero(cx, 0x203, shaderControlMask(zFormat), "depth export, shader coverage or ordered fragment execution"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage"); !reason.empty()) return reason;
-    if (auto reason = nonzero(cx, 0x2f8, AaConfigSamplesMask, "multisampling"); !reason.empty()) return reason;
+    if (value(cx, 0x292, word) && (word & 1u) != 0) {
+        if (auto reason = nonzero(cx, 0x2f8, AaConfigSamplesMask, "multisampling"); !reason.empty()) return reason;
+    }
     if (auto reason = nonzero(cx, 0x292, ScanModeMask, "scan conversion mode"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <set>
 
@@ -20,11 +21,15 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     const bool hasSingular = std::filesystem::exists(singular);
     const bool hasPlural = std::filesystem::exists(plural);
     const bool hasPrx = std::filesystem::exists(prx);
+    const std::filesystem::path unity[] = {root / "Media" / "Modules", root / "Media" / "Plugins"};
+    const auto& plugins = unity[1];
+    const bool hasUnity = std::any_of(std::begin(unity), std::end(unity), [](const auto& path) { return std::filesystem::exists(path); });
     if (hasSingular && hasPlural) throw Domain::RelinkerException("Both sce_module and sce_modules exist beside the input executable");
-    if (!hasSingular && !hasPlural && !hasPrx) throw Domain::RelinkerException("sce_module/sce_modules/prx was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
+    if (!hasSingular && !hasPlural && !hasPrx && !hasUnity) throw Domain::RelinkerException("sce_module/sce_modules/prx was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
     std::vector<std::filesystem::path> directories;
     if (hasSingular || hasPlural) directories.push_back(hasSingular ? singular : plural);
     if (hasPrx) directories.push_back(prx);
+    for (const auto& path : unity) if (std::filesystem::exists(path)) directories.push_back(path);
     std::vector<std::filesystem::path> paths;
     std::set<std::string> unmatchedExclusions = excludedModules;
     const auto isElf = [](const std::filesystem::path& path) {
@@ -211,6 +216,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     for (std::size_t index = 0; index < images.size(); ++index) visit(index);
     std::vector<std::string> hostLibraries;
     std::set<std::string> uniqueHosts;
+    std::set<std::string> neededNames;
     const auto addHost = [&](const std::string& name) {
         if (findGuest(name) != guestNames.end()) return;
         if (name.empty() || name.find_first_of("/\\:$") != std::string::npos) throw Domain::RelinkerException("Invalid host dependency: " + name);
@@ -224,9 +230,14 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         const auto start = dynamic.DynStrData.begin() + nameOffset;
         const auto end = std::find(start, dynamic.DynStrData.end(), 0);
         if (end == dynamic.DynStrData.end()) throw Domain::RelinkerException("Unterminated dependency string");
-        addHost(std::string(start, end));
+        const std::string name(start, end);
+        neededNames.insert(name);
+        addHost(name);
     }
-    for (const auto& image : images) for (const auto& dependency : image.Dependencies) addHost(dependency);
+    for (const auto& image : images) for (const auto& dependency : image.Dependencies) {
+        neededNames.insert(dependency);
+        addHost(dependency);
+    }
     if (uniqueHosts.contains("libSceLibcInternal.prx") && uniqueHosts.insert("libc.prx").second) hostLibraries.push_back("libc.prx");
     dynamic.DynamicSegmentData.clear();
     const auto addNeeded = [&](const std::string& name) {
@@ -253,6 +264,8 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         if (std::filesystem::exists(target) && std::filesystem::equivalent(inputPath, target)) throw Domain::RelinkerException("Guest output would overwrite the input executable");
         Domain::GuestRuntime runtime;
         runtime.UsePlatformTlsResolver = image.UsePlatformTlsResolver;
+        runtime.DeferredStart = image.SourcePath.parent_path() == plugins &&
+            !neededNames.contains(image.SourcePath.filename().string()) && (image.Soname.empty() || !neededNames.contains(image.Soname));
         runtime.Path = relativeDirectory + "/" + image.OutputName;
         runtime.Names = {image.SourcePath.filename().string(), image.Soname};
         std::vector<std::uint8_t> output;
