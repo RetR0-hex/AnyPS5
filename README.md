@@ -25,6 +25,7 @@ The [shader recompiler](core/shader/recompiler/Recompiler.cpp) successfully prod
 ## Compatibility
 
 See the [game compatibility list](docs/user/COMPATIBILITY.md) for tested games and known issues.
+For the per-title MSAA option and debug-heavy runner, see [runtime diagnostics](docs/dev/BUILD.md#disable-unity-msaa).
 
 ## Input mapping
 

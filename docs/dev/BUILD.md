@@ -26,6 +26,25 @@ library change without it therefore tests the previous binaries and can show no 
 
 [Relinker usage and runtime layout](../user/USAGE.md).
 
+## Disable Unity MSAA
+
+In AnyPS5 Launcher, right-click a title, choose **Game Settings…**, enable
+**Disable MSAA**, and save. The setting is stored per title. Leave it unchecked
+to use the title's original setting.
+
+For a command-line run, install UnityPy if it is not already available to Python,
+then use the diagnostic runner:
+
+```sh
+python -m pip install "UnityPy>=1.20,<2"
+python tools/debug_run.py --disable-msaa --debug-heavy --seconds 45 path/to/app.exe
+```
+
+The executable must be beside `app0/Media/globalgamemanagers`. The runner prepares
+a separate override under `.anyps5/msaa-off/` and applies it only to that run;
+the original game file stays unchanged. Omit `--debug-heavy` for a lower-noise
+run, or omit `--disable-msaa` to use the original Unity setting.
+
 ## Runtime diagnostics
 
 Run a converted executable with the diagnostic runner:
