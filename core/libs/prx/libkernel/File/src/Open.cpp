@@ -142,8 +142,10 @@ int APS5_VABI sceKernelClose(int d) {
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);
 #endif
-    // Unity closes the descriptor of a file it failed to open, which is 0; the
-    // console answers EBADF, so this returns the error instead of stopping.
+    // Unity closes the descriptor of a file it failed to open, which is 0. On the
+    // console 0-2 stay with the standard streams, so closing them must not free the
+    // number for the next file (Unity would then read two files through one).
+    if (d >= 0 && d <= 2) return 0;
     if (NativeClose(d) != 0) return SceErrorFromErrno(errno);
     return 0;
 }
