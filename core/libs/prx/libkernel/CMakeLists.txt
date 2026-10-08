@@ -432,6 +432,13 @@ if(BUILD_TESTING)
         add_test(NAME guest_standard_descriptors COMMAND guest_standard_descriptors_tests)
         set_tests_properties(guest_standard_descriptors PROPERTIES TIMEOUT 15 ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test_executable(guest_pread_position_tests ${LIBS_INCLUDE_DIR}/tests/GuestPreadPosition.cpp)
+        target_include_directories(guest_pread_position_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_pread_position_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_pread_position_tests)
+        add_test(NAME guest_pread_position COMMAND guest_pread_position_tests)
+        set_tests_properties(guest_pread_position PROPERTIES TIMEOUT 15 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
         add_test_executable(guest_directory_close_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryClose.cpp)
         target_include_directories(guest_directory_close_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_directory_close_tests PRIVATE libkernel libc)

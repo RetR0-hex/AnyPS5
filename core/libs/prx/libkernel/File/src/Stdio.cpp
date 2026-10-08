@@ -101,12 +101,22 @@ static std::int64_t NativePositioned(int descriptor, void* buf, std::size_t nbyt
         errno = EBADF;
         return -1;
     }
+    // On a synchronous handle ReadFile/WriteFile at an offset also move the file
+    // position; pread and pwrite must not, since reads without an offset follow it.
+    LARGE_INTEGER position{};
+    if (!::SetFilePointerEx(handle, {}, &position, FILE_CURRENT)) {
+        errno = EIO;
+        return -1;
+    }
     OVERLAPPED overlapped{};
     overlapped.Offset = static_cast<DWORD>(offset);
     overlapped.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32u);
     DWORD done = 0;
     const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped)
                           : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped);
+    const DWORD error = ::GetLastError();
+    ::SetFilePointerEx(handle, position, nullptr, FILE_BEGIN);
+    ::SetLastError(error);
     if (!ok) {
         if (!write && ::GetLastError() == ERROR_HANDLE_EOF) return 0;
         errno = EIO;
