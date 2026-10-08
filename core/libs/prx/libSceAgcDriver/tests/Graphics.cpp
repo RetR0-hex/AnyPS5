@@ -118,12 +118,23 @@ void stateTests() {
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") != std::string::npos, "per-sample shading was accepted");
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "sample iteration");
     queue = makeState();
-    queue.context[0x2f8] = 0x00108001u;  // one sample, as Unity sets it
+    queue.context[0x2f8] = 0x00108010u;  // one sample with centroid and exposed-sample fields
+    queue.context[0x292] = 3u;
     (void)AgcDriver::Graphics::DecodeState(queue);
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "a single-sample AA config was rejected");
-    queue.context[0x2f8] = 0x00108021u;  // four samples
-    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") != std::string::npos, "multisampling was accepted");
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "multisampling");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("scan conversion") == std::string::npos, "MSAA_ENABLE rejected a single-sample draw");
+    for (const auto logSamples : {1u, 2u, 3u, 4u}) {
+        queue.context[0x2f8] = 0x00108000u | logSamples;
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") != std::string::npos, "multisampling was accepted");
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "multisampling");
+    }
+    queue.context[0x292] = 2u; // MSAA disabled: the programmed sample count is inactive
+    (void)AgcDriver::Graphics::DecodeState(queue);
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("multisampling") == std::string::npos, "an inactive sample count was rejected");
+    queue = makeState();
+    queue.context[0x292] = 7u;
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("scan conversion") != std::string::npos, "line stippling was accepted");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "scan conversion");
     queue = makeState();
     queue.userConfig.erase(0x24b);
     queue.context[0x2a5] = 0;

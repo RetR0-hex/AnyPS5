@@ -12,7 +12,7 @@ from test_guest_symbol_names import module_symbols
 from test_windows_import_modules import executable
 
 
-def guest(identity=None, module_name=None, missing_import=False, module_info_tag=0x6100000d):
+def guest(identity=None, module_name=None, missing_import=False, module_info_tag=0x6100000d, require_initialized=False):
     image = bytearray(0x3000)
     image[:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
     struct.pack_into('<HHIQQQIHHHHHH', image, 16,
@@ -49,6 +49,12 @@ def guest(identity=None, module_name=None, missing_import=False, module_info_tag
         code = b'\xbf' + struct.pack('<I', ord(event)) + b'\x48\x83\xec\x08\xff\x15'
         code += struct.pack('<i', 0x2820 - (address + 15)) + b'\x48\x83\xc4\x08\xc3'
         image[address:address + len(code)] = code
+    if require_initialized:
+        image[0x1000:0x1005] = b'\xe9' + struct.pack('<i', 0x1100 - 0x1005)
+        code = b'\x80\x3d' + struct.pack('<i', 0x2830 - 0x1107) + b'\x01\x74\x02\x0f\x0b\xb8\x2a\0\0\0\xc3'
+        image[0x1100:0x1100 + len(code)] = code
+        code = b'\xc6\x05' + struct.pack('<i', 0x2830 - 0x104a) + b'\x01\xc3'
+        image[0x1043:0x1043 + len(code)] = code
     return image
 
 
@@ -119,11 +125,12 @@ def main():
                     ('libkernel.prx', None, None, 'libkernel.prx', 0x6100000d),
                     ('ordinary.prx', None, None, None, 0x6100000d),
                     ('unimplemented.prx', 'libNotReplaced.prx', None, None, 0x6100000d)):
-                suppressed = replacement is not None
+                suppressed = replacement is not None and replacement != 'libc.prx'
                 case = work / f'{windows}-{name}-{identity}-{module_name}'
                 modules = case / 'sce_module'
                 modules.mkdir(parents=True)
-                original = guest(identity, module_name, module_info_tag=module_info_tag)
+                original = guest(identity, module_name, module_info_tag=module_info_tag,
+                                 require_initialized=replacement == 'libc.prx')
                 (modules / name).write_bytes(original)
                 (modules / 'consumer.prx').write_bytes(consumer(name))
                 source = case / 'input.elf'
@@ -168,15 +175,15 @@ def main():
             case = work / f'{windows}-missing-import'
             modules = case / 'sce_module'
             modules.mkdir(parents=True)
-            (modules / 'libc.prx').write_bytes(guest(missing_import=True))
+            (modules / 'libkernel.prx').write_bytes(guest(missing_import=True))
             source = case / 'input.elf'
-            source.write_bytes(executable('libc.prx'))
+            source.write_bytes(executable('libkernel.prx'))
             output = case / ('output.exe' if windows else 'output.elf')
             result = subprocess.run([str(relinker), *(['--windows'] if windows else []),
                                      '--skip-syscall-check', str(source), str(output)],
                                     capture_output=True, text=True, timeout=30)
             assert result.returncode == 0, (result.stdout, result.stderr)
-            converted = case / 'app0' / 'sce_module' / 'libc.prx.guest.prx'
+            converted = case / 'app0' / 'sce_module' / 'libkernel.prx.guest.prx'
             if not windows:
                 assert 'absent' in module_symbols(converted.read_bytes())
                 assert lifecycle_tags(converted.read_bytes()) == set()
@@ -184,6 +191,7 @@ def main():
                 libraries = case / 'libs'
                 libraries.mkdir()
                 shutil.copyfile(fixture, libraries / 'libc.prx')
+                shutil.copyfile(fixture, libraries / 'libkernel.prx')
                 output.chmod(0o755)
                 command = [str(output)] if windows else [sys.executable, __file__, '--load', str(converted)]
                 run = subprocess.run(command, env={**os.environ, 'ANYPS5_LIFECYCLE_EVENTS': str(case / 'events.txt')},

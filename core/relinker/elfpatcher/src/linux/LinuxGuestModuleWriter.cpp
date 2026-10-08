@@ -73,7 +73,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         Io::AppendU32(bytes, static_cast<std::uint32_t>(displacement));
         return start;
     };
-    const bool ownsLifecycle = image.ReplacementModule.empty();
+    const bool ownsLifecycle = image.OwnsLifecycle();
     const auto init = ownsLifecycle ? lifecycle(image.Init) : 0;
     const auto fini = ownsLifecycle ? lifecycle(image.Fini) : 0;
     Io::AlignBuffer(bytes, 8);

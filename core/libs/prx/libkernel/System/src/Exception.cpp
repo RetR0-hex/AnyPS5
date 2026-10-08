@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <string_view>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -190,6 +192,29 @@ bool Exited(HANDLE native) {
     return WaitForSingleObject(native, 0) == WAIT_OBJECT_0;
 }
 
+bool HostContext(const CONTEXT& context) {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(context.Rip), &module)) return false;
+    if (module == GetModuleHandleW(nullptr)) return false;
+    std::array<wchar_t, 32768> path{};
+    const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size())
+        throw std::runtime_error("sceKernelRaiseException: cannot identify the interrupted image");
+    return !std::wstring_view(path.data(), length).ends_with(L".guest.prx");
+}
+
+struct SuspendedDeliveryScope {
+    HANDLE native;
+    Pthread previous;
+
+    SuspendedDeliveryScope(HANDLE target, Pthread thread) : native(target), previous(ExchangeCurrentGuestThread(thread)) {}
+    ~SuspendedDeliveryScope() {
+        ExchangeCurrentGuestThread(previous);
+        ResumeThread(native);
+    }
+};
+
 bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
     if (thread == scePthreadSelf()) {
         CONTEXT context{};
@@ -219,6 +244,29 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
     if (!GetThreadContext(native, &delivery.context)) {
         ResumeThread(native);
         throw std::runtime_error("sceKernelRaiseException: cannot read the target thread context");
+    }
+    bool hostContext;
+    try {
+        hostContext = HostContext(delivery.context);
+    } catch (...) {
+        ResumeThread(native);
+        throw;
+    }
+    if (hostContext) {
+        queued->context = delivery.context;
+        try {
+            std::thread([thread, native, delivery = std::move(queued)]() mutable {
+                SuspendedDeliveryScope scope(native, thread);
+                const CONTEXT before = delivery->context;
+                Deliver(delivery->handler, delivery->signum, delivery->context);
+                if (std::memcmp(&before, &delivery->context, sizeof(CONTEXT)) != 0 && !SetThreadContext(native, &delivery->context))
+                    throw std::runtime_error("sceKernelRaiseException: cannot update the suspended target context");
+            }).detach();
+        } catch (...) {
+            ResumeThread(native);
+            throw;
+        }
+        return true;
     }
     const DWORD64 slot = (delivery.context.Rsp - RedZone - sizeof(Delivery)) & ~static_cast<DWORD64>(15);
     if (!StackWritable(slot - HomeArea - 8, delivery.context.Rsp - RedZone)) {

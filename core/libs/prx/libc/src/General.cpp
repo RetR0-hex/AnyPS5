@@ -7,6 +7,7 @@
 #include <optional>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <set>
@@ -81,6 +82,19 @@ std::filesystem::path Resolve(WorkingDirectory& state, const char* path) {
 #endif
     auto guest = (std::filesystem::path("/") / state.current.lexically_relative(state.root));
     guest = (input.is_absolute() ? input : guest / input).lexically_normal();
+    // Unity's quality profiles can request unsupported multisampled attachments.
+    // The optional override is prepared by tools/runtime_settings.py; the original
+    // serialized file remains unchanged. Other engines keep their own settings.
+    static const bool disableMsaa = [] {
+        const char* flag = std::getenv("ANYPS5_DISABLE_MSAA");
+        return flag != nullptr && std::strcmp(flag, "1") == 0;
+    }();
+    if (disableMsaa && guest == "/app0/Media/globalgamemanagers") {
+        const auto overridePath = state.root / ".anyps5/msaa-off/globalgamemanagers";
+        if (!std::filesystem::is_regular_file(overridePath))
+            throw std::runtime_error("ANYPS5_DISABLE_MSAA=1 requires an override prepared with tools/runtime_settings.py --disable-msaa");
+        return std::filesystem::path(overridePath).make_preferred();
+    }
     if (auto aliased = ResolveAlias(guest.relative_path().generic_string())) return *aliased;
     return (state.root / guest.relative_path()).make_preferred();
 }

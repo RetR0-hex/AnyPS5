@@ -42,6 +42,10 @@ struct GuestImage {
     std::uint64_t Fini = 0;
     std::uint64_t Got = 0;
     bool UsePlatformTlsResolver = true;
+
+    bool OwnsLifecycle() const {
+        return ReplacementModule.empty() || ReplacementModule == "libc.prx";
+    }
 };
 
 class GuestImageReader {

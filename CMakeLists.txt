@@ -78,5 +78,9 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_test(NAME progress_report COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_progress.py)
+        add_test(NAME debug_run_tests COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_debug_run.py)
+        add_test(NAME runtime_settings_tests COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_runtime_settings.py)
     endif()
 endif()

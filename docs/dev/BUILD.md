@@ -26,6 +26,35 @@ library change without it therefore tests the previous binaries and can show no 
 
 [Relinker usage and runtime layout](../user/USAGE.md).
 
+## Runtime diagnostics
+
+Run a converted executable with the diagnostic runner:
+
+```sh
+python tools/debug_run.py --debug-heavy --seconds 45 path/to/app.exe
+```
+
+`--debug-heavy` enables the runtime's `APS5_TRACE_*` switches, GPU/draw profiling
+and queue 0 packet dumps. It also enables the capture event trace and GPU frame
+readbacks (up to eight frames, one per 60 presents). Existing environment values
+take precedence. Artifacts
+go to a new directory under `build/debug-runs`: stdout/stderr in `game.log`, a
+`summary.json` with draw rejection counts and fatal errors, and a `manifest.json`
+with the command, trace configuration and module addresses. Newly written runtime
+files (rejected-draw registers, GPU frame bitmaps, target dumps and capture trace)
+are copied from the executable directory into the run directory. Old files are
+excluded. This mode produces
+large logs and affects timing.
+
+On Windows, the runner also saves periodic thread contexts, frame pointer chains,
+stack address candidates and captures of the launched process's window. Guest
+code addresses include the module offset and guest virtual address. Stack address
+candidates can include data pointers and are not an unwound call stack. Threads
+are briefly suspended individually and resumed after each snapshot. Use
+`--snapshot-interval` to change the interval and `--output` for a new artifact
+directory. Put runner options before the executable; subsequent arguments are
+passed to that executable.
+
 ## CMake flags
 
 Project switches accept `ON` or `OFF`:

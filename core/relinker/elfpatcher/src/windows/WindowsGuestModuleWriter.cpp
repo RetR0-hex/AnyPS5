@@ -184,7 +184,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     }
     const auto entry = nextRva;
     sections.push_back({".dllmain", entry, SectionRead | SectionExecute | 0x20u, {0xb8, 1, 0, 0, 0, 0xc3}});
-    if (guest.ReplacementModule.empty()) {
+    if (guest.OwnsLifecycle()) {
         for (const auto slot : guest.InitArray) runtime.InitArrayRvas.push_back(image.GetRva(slot, 8));
         for (const auto slot : guest.FiniArray) runtime.FiniArrayRvas.push_back(image.GetRva(slot, 8));
         runtime.InitRva = guest.Init == 0 ? 0 : image.GetRva(guest.Init);
