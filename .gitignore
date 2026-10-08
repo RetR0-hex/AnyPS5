@@ -109,4 +109,5 @@ cookies.txt
 
 .env
 .env.local
-/docs
+/docs/dev/ninja-gaiden/
+AGENTS.md
