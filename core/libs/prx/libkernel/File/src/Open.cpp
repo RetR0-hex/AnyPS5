@@ -8,8 +8,6 @@
 #include "SceTypes.hpp"
 
 #include <cerrno>
-#include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -18,22 +16,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
-// On the console descriptors 0-2 are always stdin, stdout and stderr, so a game's
-// first file is never 0 (Unity treats 0 as "no file"). A program started without
-// them would hand them out, so they are filled with NUL first.
-static bool ReserveStandardDescriptors() {
-    for (;;) {
-        const int fd = ::_open("NUL", _O_RDWR | _O_BINARY);
-        if (fd < 0) return false;
-        if (fd > 2) {
-            ::_close(fd);
-            return true;
-        }
-    }
-}
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
-    static const bool reserved = ReserveStandardDescriptors();
-    (void)reserved;
     return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
@@ -51,10 +34,8 @@ static int NativeWrite(int fd, const void* buf, std::size_t n) {
     }
     return ::_write(fd, buf, static_cast<unsigned int>(n));
 }
-// Exported by the UCRT; MinGW's headers only declare the process-wide variant.
-extern "C" _invalid_parameter_handler __cdecl _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
-static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, std::uintptr_t) {}
-// A bad descriptor is an error the guest gets back (EBADF), not a crash to report.
+extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 static int NativeClose(int fd) {
     const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_close(fd);
@@ -135,6 +116,8 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
     if (fd < 0) {
         return SceErrorFromErrno(errno);
     }
+    if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY || (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC)))
+        RecordWrittenPath_nid_no_patch(native);
     return fd;
 }
 
@@ -142,11 +125,13 @@ int APS5_VABI sceKernelClose(int d) {
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);
 #endif
-    // Unity closes the descriptor of a file it failed to open, which is 0. On the
-    // console 0-2 stay with the standard streams, so closing them must not free the
-    // number for the next file (Unity would then read two files through one).
+    // The guest may close fd 0 after a failed open. Keep the standard stream
+    // descriptors reserved so later opens cannot alias stdin/stdout/stderr.
     if (d >= 0 && d <= 2) return 0;
-    if (NativeClose(d) != 0) return SceErrorFromErrno(errno);
+    if (NativeClose(d) != 0) {
+        if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF;
+        throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+    }
     return 0;
 }
 
@@ -209,6 +194,7 @@ int APS5_VABI sceKernelUnlink(const char* path) {
     if (NativeUnlink(native) != 0) {
         return SceErrorFromErrno(errno);
     }
+    RecordWrittenPath_nid_no_patch(native);
     return 0;
 }
 

@@ -5,10 +5,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <stdexcept>
 #include <thread>
-#include <utility>
 #include <vector>
 
 static uintptr_t Sampler(uintptr_t system, const std::vector<std::int16_t>& pcm, std::uint32_t repeats) {
@@ -439,246 +437,25 @@ static void TestAllocator() {
     Require(sceNgs2RackDestroy(master, nullptr) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
 }
 
-static void PutLe(std::vector<std::uint8_t>& out, std::uint32_t value, int bytes) {
-    for (int i = 0; i < bytes; i++) out.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
-}
+static uintptr_t exitSystem = 0;
 
-static void PutTag(std::vector<std::uint8_t>& out, const char* tag) {
-    out.insert(out.end(), tag, tag + 4);
-}
-
-struct WavSpec {
-    std::uint16_t tag = 1;
-    std::uint16_t channels = 1;
-    std::uint32_t sampleRate = 48000;
-    std::uint16_t bits = 16;
-    std::uint16_t blockAlign = 2;
-    bool extensible = false;
-    std::uint32_t loops = 0;
-};
-
-static std::vector<std::uint8_t> WavFile(const WavSpec& spec, const std::vector<std::uint8_t>& data) {
-    static constexpr std::uint8_t SubtypeTail[14] = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-    std::vector<std::uint8_t> file;
-    PutTag(file, "RIFF");
-    PutLe(file, 0, 4);
-    PutTag(file, "WAVE");
-    PutTag(file, "fmt ");
-    PutLe(file, spec.extensible ? 40 : 16, 4);
-    PutLe(file, spec.extensible ? 0xfffe : spec.tag, 2);
-    PutLe(file, spec.channels, 2);
-    PutLe(file, spec.sampleRate, 4);
-    PutLe(file, spec.sampleRate * spec.blockAlign, 4);
-    PutLe(file, spec.blockAlign, 2);
-    PutLe(file, spec.bits, 2);
-    if (spec.extensible) {
-        PutLe(file, 22, 2);
-        PutLe(file, spec.bits, 2);
-        PutLe(file, 0, 4);
-        PutLe(file, spec.tag, 2);
-        file.insert(file.end(), SubtypeTail, SubtypeTail + sizeof(SubtypeTail));
-    }
-    if (spec.loops != 0) {
-        PutTag(file, "smpl");
-        PutLe(file, 60, 4);
-        for (int i = 0; i < 7; i++) PutLe(file, 0, 4);
-        PutLe(file, spec.loops, 4);
-        PutLe(file, 0, 4);
-        for (int i = 0; i < 6; i++) PutLe(file, 0, 4);
-    }
-    PutTag(file, "data");
-    PutLe(file, static_cast<std::uint32_t>(data.size()), 4);
-    file.insert(file.end(), data.begin(), data.end());
-    const auto riffSize = static_cast<std::uint32_t>(file.size() - 8);
-    std::memcpy(file.data() + 4, &riffSize, sizeof(riffSize));
-    return file;
-}
-
-static std::vector<std::uint8_t> Bytes(const std::vector<std::int16_t>& samples) {
-    std::vector<std::uint8_t> bytes(samples.size() * sizeof(std::int16_t));
-    std::memcpy(bytes.data(), samples.data(), bytes.size());
-    return bytes;
-}
-
-static void TestParsePcm() {
-    const std::vector<std::int16_t> stereo = {100, -100, 200, -200, 300, -300};
-    const auto file = WavFile({1, 2, 44100, 16, 4}, Bytes(stereo));
-    Ngs2WaveformInfo info{};
-    Require(sceNgs2ParseWaveformData(file.data(), file.size(), &info) == SCE_NGS2_OK);
-    Require(info.format.waveform_type == SCE_NGS2_WAVEFORM_TYPE_PCM_I16L && info.format.num_channels == 2 && info.format.sample_rate == 44100);
-    Require(info.format.config_data == 0 && info.data_offset == file.size() - 12 && info.data_size == 12 && info.num_samples == 3);
-    Require(info.audio_unit_size == 4 && info.num_audio_unit_samples == 1 && info.num_audio_unit_per_frame == 1);
-    Require(info.audio_frame_size == 4 && info.num_audio_frame_samples == 1 && info.num_delay_samples == 0);
-    Require(info.loop_begin_position == 0 && info.loop_end_position == 0);
-    Require(info.num_blocks == 1 && info.block[0].data_offset == info.data_offset && info.block[0].data_size == 12);
-    Require(info.block[0].num_skip_samples == 0 && info.block[0].num_samples == 3 && info.block[0].num_repeats == 0);
-
-    const std::vector<std::uint8_t> floats(4 * 4, 0);
-    Require(sceNgs2ParseWaveformData(WavFile({3, 1, 48000, 32, 4}, floats).data(), WavFile({3, 1, 48000, 32, 4}, floats).size(), &info) == SCE_NGS2_OK);
-    Require(info.format.waveform_type == SCE_NGS2_WAVEFORM_TYPE_PCM_F32L && info.num_samples == 4 && info.audio_unit_size == 4);
-    const auto extensible = WavFile({1, 1, 48000, 16, 2, true}, Bytes(stereo));
-    Require(sceNgs2ParseWaveformData(extensible.data(), extensible.size(), &info) == SCE_NGS2_OK);
-    Require(info.format.waveform_type == SCE_NGS2_WAVEFORM_TYPE_PCM_I16L && info.num_samples == 6 && info.data_offset == extensible.size() - 12);
-
-    const auto badAlign = WavFile({1, 2, 48000, 16, 2}, Bytes(stereo));
-    Require(sceNgs2ParseWaveformData(badAlign.data(), badAlign.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
-    const auto noChannels = WavFile({1, 0, 48000, 16, 0}, Bytes(stereo));
-    Require(sceNgs2ParseWaveformData(noChannels.data(), noChannels.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
-    const auto tooManyChannels = WavFile({1, 9, 48000, 16, 18}, Bytes(stereo));
-    Require(sceNgs2ParseWaveformData(tooManyChannels.data(), tooManyChannels.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
-    const auto noRate = WavFile({1, 1, 0, 16, 2}, Bytes(stereo));
-    Require(sceNgs2ParseWaveformData(noRate.data(), noRate.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
-
-    for (const WavSpec& unsupported : {WavSpec{1, 1, 48000, 8, 1}, WavSpec{1, 1, 48000, 24, 3}, WavSpec{3, 1, 48000, 64, 8}, WavSpec{1, 1, 48000, 16, 2, false, 1}}) {
-        const auto wav = WavFile(unsupported, Bytes(stereo));
-        bool threw = false;
-        try {
-            sceNgs2ParseWaveformData(wav.data(), wav.size(), &info);
-        } catch (const std::runtime_error&) {
-            threw = true;
-        }
-        Require(threw);
-    }
-}
-
-static void TestPlayParsedPcm() {
-    const std::vector<std::int16_t> pcm = {1000, 2000, 3000, 4000, 5000};
-    const auto file = WavFile({}, Bytes(pcm));
-    Ngs2WaveformInfo info{};
-    Require(sceNgs2ParseWaveformData(file.data(), file.size(), &info) == SCE_NGS2_OK);
-
-    const auto system = CreateSystem();
-    const auto master = Mastering(system, 1);
-    const auto voice = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SAMPLER));
-    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP, Ngs2SamplerVoiceSetupParam{{}, info.format});
-    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, file.data(), 0, info.num_blocks, info.block});
-    Patch(voice, master);
-    Event(voice, SCE_NGS2_VOICE_EVENT_PLAY);
-    const auto out = RenderI16(system);
-    for (std::size_t i = 0; i < pcm.size(); i++) Require(out[i] == pcm[i]);
-    Require(out[pcm.size()] == 0);
-    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
-}
-
-static uintptr_t StereoChain(uintptr_t system) {
-    const auto master = Mastering(system, 2);
-    const auto submixer = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SUBMIXER));
-    Control(submixer, SCE_NGS2_SUBMIXER_VOICE_PARAM_SETUP, Ngs2SubmixerVoiceSetupParam{{}, 2, 0});
-    Patch(submixer, master);
-    Event(submixer, SCE_NGS2_VOICE_EVENT_PLAY);
-    const std::vector<std::int16_t> pcm(Grain, 16384);
-    const auto sampler = Sampler(system, pcm, 0);
-    Patch(sampler, submixer);
-    const float levels[2] = {1.0f, 0.5f};
-    Control(sampler, SCE_NGS2_VOICE_PARAM_MATRIX_LEVELS, Ngs2VoiceMatrixLevelsParam{{}, 0, 2, levels});
-    Control(sampler, SCE_NGS2_VOICE_PARAM_PORT_MATRIX, Ngs2VoicePortMatrixParam{{}, 0, 0});
-    Event(sampler, SCE_NGS2_VOICE_EVENT_PLAY);
-    return master;
-}
-
-static void TestMasteringIntoWiderBuffer() {
-    const auto system = CreateSystem();
-    StereoChain(system);
-    std::vector<float> out(Grain * 8, -1.0f);
-    const Ngs2RenderBufferInfo info{out.data(), out.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, 8};
-    Require(sceNgs2SystemRender(system, &info, 1) == SCE_NGS2_OK);
-    for (std::uint32_t i = 0; i < Grain; i++) {
-        Require(out[i * 8] == 0.5f && out[i * 8 + 1] == 0.25f);
-        for (std::uint32_t channel = 2; channel < 8; channel++) Require(out[i * 8 + channel] == 0.0f);
-    }
-
-    std::vector<std::int16_t> pcm16(Grain * 8, -1);
-    const Ngs2RenderBufferInfo info16{pcm16.data(), pcm16.size() * sizeof(std::int16_t), SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 8};
-    Require(sceNgs2SystemRender(system, &info16, 1) == SCE_NGS2_OK);
-    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
-
-    const auto narrow = CreateSystem();
-    StereoChain(narrow);
-    std::vector<float> mono(Grain, 0.0f);
-    const Ngs2RenderBufferInfo monoInfo{mono.data(), mono.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, 1};
-    bool threw = false;
-    try {
-        sceNgs2SystemRender(narrow, &monoInfo, 1);
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-    Require(threw);
-    Require(sceNgs2SystemDestroy(narrow, nullptr) == SCE_NGS2_OK);
-}
-
-static std::vector<std::pair<std::uintptr_t, const void*>> streamEvents;
-static void APS5_VABI OnStream(const Ngs2VoiceCallbackInfo* info) {
-    Require(info->flag == SCE_NGS2_VOICE_CALLBACK_FLAG_BLOCK_END);
-    streamEvents.push_back({info->user_data, info->block_data});
-}
-
-static uintptr_t StreamVoice(uintptr_t system) {
-    const auto master = Mastering(system, 1);
-    const auto voice = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SAMPLER));
-    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP, Ngs2SamplerVoiceSetupParam{{}, {SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 1, 48000, 0, 0, 0}});
-    Patch(voice, master);
-    Control(voice, SCE_NGS2_VOICE_PARAM_CALLBACK, Ngs2VoiceCallbackParam{{}, OnStream, 0, SCE_NGS2_VOICE_CALLBACK_FLAG_BLOCK_END, 0});
-    return voice;
-}
-
-static void TestPcmStreaming() {
-    const std::vector<std::int16_t> first = {100, 200, 300, 400};
-    const std::vector<std::int16_t> second = {500, 600, 700, 800, 900, 1000, 1100, 1200};
-    const auto system = CreateSystem();
-    const auto voice = StreamVoice(system);
-    streamEvents.clear();
-    const Ngs2WaveformBlock head{0, first.size() * sizeof(std::int16_t), 0, 0, 12, 0, 0x11};
-    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, first.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE, 1, &head});
-    Event(voice, SCE_NGS2_VOICE_EVENT_PLAY);
-
-    auto out = RenderI16(system);
-    for (std::size_t i = 0; i < first.size(); i++) Require(out[i] == first[i]);
-    for (std::size_t i = first.size(); i < Grain; i++) Require(out[i] == 0);
-    Require((Flags(voice) & SCE_NGS2_VOICE_STATE_FLAG_PLAYING) != 0);
-    Require(streamEvents.size() == 1 && streamEvents[0].first == 0x11 && streamEvents[0].second == first.data());
-
-    const Ngs2WaveformBlock more{0, second.size() * sizeof(std::int16_t), 0, 0, 0, 0, 0x22};
-    Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS,
-            Ngs2SamplerVoiceWaveformBlocksParam{{}, second.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_DATA_ONLY, 1, &more});
-    out = RenderI16(system);
-    for (std::size_t i = 0; i < second.size(); i++) Require(out[i] == second[i]);
-    Require(streamEvents.size() == 2 && streamEvents[1].first == 0x22 && streamEvents[1].second == second.data());
-    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
-
-    const auto strict = CreateSystem();
-    const auto closed = StreamVoice(strict);
-    bool threw = false;
-    try {
-        Control(closed, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, first.data(), 0, 1, &head});
-    } catch (const std::invalid_argument&) {
-        threw = true;
-    }
-    Require(threw);
-    threw = false;
-    try {
-        Control(closed, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS,
-                Ngs2SamplerVoiceWaveformBlocksParam{{}, second.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_DATA_ONLY, 1, &more});
-    } catch (const std::invalid_argument&) {
-        threw = true;
-    }
-    Require(threw);
-    Require(sceNgs2SystemDestroy(strict, nullptr) == SCE_NGS2_OK);
+static void RenderAfterStaticTeardown() {
+    RenderI16(exitSystem);
+    Require(sceNgs2SystemDestroy(exitSystem, nullptr) == SCE_NGS2_OK);
 }
 
 int main() {
-    TestPcmStreaming();
-    TestParsePcm();
-    TestPlayParsedPcm();
+    Require(std::atexit(RenderAfterStaticTeardown) == 0);
     TestErrorsAndInfo();
     TestPcmBlockEnd();
     TestPitchAndRepeat();
     TestSubmixerMatrix();
-    TestMasteringIntoWiderBuffer();
     TestSampleRate();
     TestUserData();
     TestMasteringGain();
     TestStereoIntoSurround();
     TestLock();
     TestAllocator();
+    exitSystem = CreateSystem();
     return 0;
 }

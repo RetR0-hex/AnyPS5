@@ -198,6 +198,8 @@ static void TestParseFile() {
     Ngs2WaveformInfo info{};
     Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 37, nullptr) == SCE_NGS2_ERROR_INVALID_OUT_ADDRESS);
     Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 37, &info) == SCE_NGS2_OK);
+    expected.data_offset += 37;
+    for (std::uint32_t i = 0; i < expected.num_blocks; ++i) expected.block[i].data_offset += 37;
     Require(std::memcmp(&info, &expected, sizeof(info)) == 0);
     Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", 0, &info) == SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT);
     Require(sceNgs2ParseWaveformFile("/app0/ngs2_wave.bin", packed.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA);

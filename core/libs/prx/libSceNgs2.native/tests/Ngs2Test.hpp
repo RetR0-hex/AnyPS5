@@ -6,12 +6,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <deque>
 #include <vector>
 
 extern "C" {
 int APS5_VABI sceNgs2ParseWaveformData(const void*, size_t, Ngs2WaveformInfo*);
-int APS5_VABI sceNgs2ParseWaveformFile(const char*, uint64_t, Ngs2WaveformInfo*);
+int APS5_VABI sceNgs2ParseWaveformFile(const char*, uint32_t, Ngs2WaveformInfo*);
 int APS5_VABI sceNgs2CalcWaveformBlock(const Ngs2WaveformFormat*, uint32_t, uint32_t, Ngs2WaveformBlock*);
 int APS5_VABI sceNgs2SystemResetOption(Ngs2SystemOption*);
 int APS5_VABI sceNgs2SystemQueryBufferSize(const Ngs2SystemOption*, Ngs2ContextBufferInfo*);
@@ -50,10 +49,11 @@ inline void Check(bool value, int line) {
 
 inline constexpr std::uint32_t Grain = 8;
 
-inline std::deque<std::vector<std::uint64_t>> buffers;
+inline std::vector<std::uint64_t> buffers[32];
+inline std::size_t usedBuffers = 0;
 
 inline Ngs2ContextBufferInfo Buffer(const Ngs2ContextBufferInfo& query) {
-    auto& storage = buffers.emplace_back();
+    auto& storage = buffers[usedBuffers++];
     storage.resize(query.host_buffer_size / sizeof(std::uint64_t) + 1);
     Ngs2ContextBufferInfo info{};
     info.host_buffer = storage.data();

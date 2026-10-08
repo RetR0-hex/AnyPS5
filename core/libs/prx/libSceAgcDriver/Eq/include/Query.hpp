@@ -5,5 +5,6 @@
 
 extern "C" uint32_t APS5_VABI sceAgcDriverGetEqContextId(const KernelEvent* ev);
 extern "C" int APS5_VABI sceAgcDriverGetEqEventType(const KernelEvent* ev);
+extern "C" uint32_t APS5_VABI sceAgcDriverGetEqContextId(const KernelEvent* ev);
 
 #endif

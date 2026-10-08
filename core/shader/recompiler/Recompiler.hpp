@@ -44,6 +44,7 @@ struct ShaderComputeStageInfo {
     bool tgSizeEnable;
     std::uint32_t threadIdComponentCount;
     std::array<std::uint32_t, 3> partialThreads;
+    std::uint32_t scratchDwords = 0;
 
     [[nodiscard]] bool PartialGroups() const {
         return partialThreads != std::array<std::uint32_t, 3>{};
@@ -126,6 +127,7 @@ struct ShaderPixelStageInfo {
     bool earlyZ;
     bool executeOnNoop;
     ConservativeZExport conservativeZExport;
+    bool orderedPixelShader;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
 };
@@ -197,6 +199,7 @@ struct SpirvTarget {
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
     bool nonConstantImageOffsets = false;
+    std::uint32_t srgbDecodeFormats = 0;
 };
 
 struct BindingLayout {
@@ -290,7 +293,8 @@ enum class DescriptorImageShape {
     Image2D,
     Image2DArray,
     ImageCube,
-    Image3D
+    Image3D,
+    Image1DArray
 };
 
 enum class DescriptorRole {

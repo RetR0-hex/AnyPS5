@@ -12,6 +12,7 @@
 
 namespace {
 
+constexpr int PAD_ERROR_DEVICE_NOT_CONNECTED = static_cast<int>(0x80920007);
 constexpr int PAD_ERROR_DEVICE_NO_HANDLE = static_cast<int>(0x80920008);
 
 bool g_opened = false;
@@ -139,6 +140,22 @@ int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void
  return PAD_HANDLE;
 }
 
+int APS5_VABI scePadOpenExt(int userId, int type, int index, const void* param) {
+ if (!ValidPort(userId, type, index) || param == nullptr) {
+  return PAD_ERROR_INVALID_ARG;
+ }
+ if (type != PAD_PORT_TYPE_SPECIAL) NotImplemented_nid_no_patch(__func__);
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
+}
+
+int APS5_VABI scePadReadExt() { NotImplemented_nid_no_patch(__func__); return 0; }
+
+int APS5_VABI scePadGetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+
+int APS5_VABI scePadSetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+
+int APS5_VABI scePadOutputReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+
 int APS5_VABI scePadReadState(int handle, PadData* data);
 
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
@@ -243,15 +260,17 @@ int APS5_VABI scePadVrControllerRead() {
  return 0;
 }
 
-// Name unknown. Unity calls it with an open handle and a zeroed byte, ignores the
-// result and reports twice the byte in its controller information; 0 is what it
-// assumes when nothing is written, so that is what is reported.
-APS5_EXPORT("fCWdlnmB1Ks", scePadUnknown_fCWdlnmB1Ks);
-int APS5_VABI scePadUnknown_fCWdlnmB1Ks(int handle, std::uint8_t* value) {
+int APS5_VABI scePadIsRemoteController(int handle, bool* remote) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
- if (value == nullptr) return PAD_ERROR_INVALID_ARG;
- *value = 0;
- return PAD_OK;
+ if (remote == nullptr) return PAD_ERROR_INVALID_ARG;
+ *remote = false;
+ return 0;
+}
+
+
+int APS5_VABI scePadSetAngularVelocityBiasCorrectionState() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
 }
 
 }

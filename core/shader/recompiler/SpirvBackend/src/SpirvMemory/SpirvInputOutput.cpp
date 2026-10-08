@@ -19,24 +19,6 @@ namespace ShaderRecompiler
         constexpr std::uint32_t PsInputFlatShade = 0x00000400u;
         constexpr std::uint32_t PixelParameterLimit = 32u;
 
-        IrShaderStage StageOf(const SpirvEmitterState& state) {
-            return state.program.Resources().stage;
-        }
-
-        const ShaderVertexInputInfo& VertexInfo(const SpirvEmitterState& state) {
-            if (state.inputInfo.vertex == nullptr) {
-                FailEmit("vertex input info is missing");
-            }
-            return *state.inputInfo.vertex;
-        }
-
-        const ShaderPixelInputInfo& PixelInfo(const SpirvEmitterState& state) {
-            if (state.inputInfo.pixel == nullptr) {
-                FailEmit("pixel input info is missing");
-            }
-            return *state.inputInfo.pixel;
-        }
-
         bool IsVertexLikeStage(const SpirvEmitterState& state) {
             return StageOf(state) == IrShaderStage::Vertex || StageOf(state) == IrShaderStage::Local;
         }
@@ -167,6 +149,10 @@ namespace ShaderRecompiler
             }
         }
         return 0;
+    }
+
+    bool OrderedPixelShader(const SpirvEmitterState& state) {
+        return state.program.Resources().stage == IrShaderStage::Pixel && state.inputInfo.pixel != nullptr && state.inputInfo.pixel->psOrderedPixelShader;
     }
 
     const SpirvInputBinding* SpirvInputBindingForParameter(const SpirvEmitterState& state, std::uint32_t location) {

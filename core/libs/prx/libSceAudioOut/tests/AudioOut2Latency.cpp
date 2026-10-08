@@ -48,9 +48,9 @@ void TestMasteringInit() {
 }
 
 void TestMasteringSetParam() {
-    const std::uint32_t params[8] = {1};
+    const std::uint32_t params[4] = {1u, 0u, 0u, 0u};
     Require(sceAudioOut2MasteringSetParam(params, 0, 0) == 0, "mastering parameters must be accepted");
-    Require(ThrowsRuntimeError([] { sceAudioOut2MasteringSetParam(nullptr, 0, 0); }), "null parameters must throw");
+    Require(ThrowsRuntimeError([] { sceAudioOut2MasteringSetParam(nullptr, 0, 0); }), "null mastering parameters must throw");
 }
 
 }

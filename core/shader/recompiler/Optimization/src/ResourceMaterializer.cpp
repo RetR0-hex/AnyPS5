@@ -46,6 +46,7 @@ struct DecodedImage {
     bool depthBits = false;
     bool depthUnorm16 = false;
     IrBufferFormat packedFormat = IrBufferFormat::Invalid;
+    bool srgbDecode = false;
 };
 
 ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
@@ -130,7 +131,7 @@ std::uint32_t storageMipCount(const ImageResource& base, const DescriptorValue& 
     return mipBase <= mipLast ? mipLast - mipBase + 1u : 0u;
 }
 
-DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const ImageResource& base) {
+DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const ImageResource& base, std::uint32_t srgbDecodeFormats) {
     DecodedImage decoded;
     decoded.mipCount = storageMipCount(base, descriptor);
     if (decoded.mipCount == 0u) {
@@ -169,10 +170,13 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         decoded.packedFormat = format;
     }
     decoded.conversionFormat = RemapTextureFormat(format) != format ? format : IrBufferFormat::Invalid;
+    decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
     if (storage || decoded.conversionFormat != IrBufferFormat::Invalid) {
         decoded.shaderSwizzle = descriptorImageSwizzle(descriptor);
     }
-    const bool rawSintStorage = storage && format == IrBufferFormat::Format32SInt && base.written && !base.read && !base.atomic;
+    const bool wideSint = format == IrBufferFormat::Format32SInt || format == IrBufferFormat::Format32_32SInt || format == IrBufferFormat::Format32_32_32_32SInt;
+    const bool narrowSint = format == IrBufferFormat::Format16SInt || format == IrBufferFormat::Format8_8SInt || format == IrBufferFormat::Format16_16SInt || format == IrBufferFormat::Format8_8_8_8SInt || format == IrBufferFormat::Format16_16_16_16SInt;
+    const bool rawSintStorage = storage && (wideSint || (narrowSint && !base.packed)) && base.written && !base.read && !base.atomic;
     decoded.numericClass = base.atomic ? IrTextureNumericClass::Uint : SampledTextureNumericClass(format);
     if (!storage && !base.depthCompare && IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) {
         decoded.depthBits = true;
@@ -186,6 +190,9 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         }
         if (rawSintStorage) {
             decoded.numericClass = IrTextureNumericClass::Uint;
+        }
+        if ((rawSintStorage || (base.atomic && format == IrBufferFormat::Format32SInt)) && !base.packed) {
+            decoded.conversionFormat = format;
         }
     } else if (decoded.numericClass == IrTextureNumericClass::Unsupported || (base.depthCompare && decoded.numericClass != IrTextureNumericClass::Float)) {
         throw std::runtime_error("sampled image descriptor uses an unsupported format");
@@ -379,7 +386,7 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         bool usable = !nullImageDescriptor(candidate) && validImageDescriptor(candidate, image.r128);
         if (usable) {
             try {
-                decoded = decodeImageDescriptor(candidate, image);
+                decoded = decodeImageDescriptor(candidate, image, plan.srgbDecodeFormats);
             } catch (const std::exception&) {
                 usable = false;
             }
@@ -388,7 +395,7 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
             paddedNull++;
             continue;
         }
-        if (decoded.conversionFormat != IrBufferFormat::Invalid || decoded.fmask) {
+        if (decoded.conversionFormat != IrBufferFormat::Invalid || decoded.fmask || decoded.srgbDecode) {
             paddedConversion++;
             continue;
         }
@@ -593,7 +600,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
     result.images.reserve(plan.info.images.size());
     for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
         const auto& image = plan.info.images[i];
-        const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image);
+        const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image, plan.srgbDecodeFormats);
         if (decoded.fmask && std::any_of(plan.info.sampledPairs.begin(), plan.info.sampledPairs.end(), [i](const SampledResourcePair& pair) { return pair.image == i; })) {
             throw std::runtime_error("FMASK requires a direct image load");
         }
@@ -612,6 +619,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         entry.depthUnorm16 = decoded.depthUnorm16;
         entry.packedFormat = decoded.packedFormat;
         entry.emulatedCompare = emulatedCompareState(plan, snapshot, i);
+        entry.srgbDecode = decoded.srgbDecode;
         result.images.push_back(entry);
     }
 
@@ -700,6 +708,7 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         image.depthUnorm16 = source.depthUnorm16;
         image.packedFormat = source.packedFormat;
         image.emulatedCompare = source.emulatedCompare;
+        image.srgbDecode = source.srgbDecode;
         if ((source.emulatedCompare & EmulatedCompare::Enabled) != 0u) image.depthCompare = false;
         image.indirectResources.clear();
     }
@@ -948,6 +957,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.shaderHash = source.shaderHash;
     plan.userDataBase = source.userDataBase;
     plan.userDataCount = source.userDataCount;
+    plan.srgbDecodeFormats = source.srgbDecodeFormats;
     plan.memoryInfo = source.memoryInfo;
     plan.descriptorSources = source.descriptorSources;
     plan.controlFlow = source.controlFlow;
@@ -1029,7 +1039,7 @@ bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
 }
 
 bool ResourceSpecialization::Image::operator==(const Image& other) const {
-    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare;
+    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare && srgbDecode == other.srgbDecode;
 }
 
 bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {

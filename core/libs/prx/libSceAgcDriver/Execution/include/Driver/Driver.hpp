@@ -68,6 +68,7 @@ private:
     static bool& onWorkerThread();
     static void copyCommands(Submission& submission, const std::uint32_t* guest, std::size_t words);
     static bool copySegment(Submission& submission, const std::uint32_t* guest, std::size_t words, std::size_t& budget);
+    static void readRegisterLists(Submission& submission);
     void waitForFlipRoom(const Submission& submission);
     void waitForFrameInFlight(std::unique_lock<std::mutex>& lock, const Submission& submission);
     void settleFrame(std::uint64_t serial, std::uint64_t batch);

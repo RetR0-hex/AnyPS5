@@ -25,10 +25,10 @@ enum class Ngs2PlayState : std::uint32_t {
     Stopped = SCE_NGS2_VOICE_STATE_FLAG_INUSE | SCE_NGS2_VOICE_STATE_FLAG_PLAYING | SCE_NGS2_VOICE_STATE_FLAG_STOPPED,
 };
 
-struct Ngs2Segment {
+struct Ngs2Piece {
     const std::uint8_t* data;
-    std::size_t bytes;
-    std::uintptr_t userData;
+    std::uint64_t firstFrame;
+    std::uint64_t frames;
 };
 
 struct Ngs2Block {
@@ -37,8 +37,9 @@ struct Ngs2Block {
     std::uint32_t cursor = 0;
     std::uint32_t numRepeated = 0;
     std::size_t dataCursor = 0;
-    std::deque<Ngs2Segment> segments;
-    std::size_t segmentStart = 0;
+    bool streaming = false;
+    std::uint64_t availableFrames = 0;
+    std::vector<Ngs2Piece> pieces;
 };
 
 struct Ngs2Atrac9DecoderDeleter {
@@ -151,6 +152,7 @@ struct Ngs2System {
 };
 
 std::string Ngs2Hex(std::uint32_t value);
+const std::uint8_t* Ngs2StreamEnd(const Ngs2Voice& voice, const Ngs2Block& block);
 std::recursive_mutex& Ngs2Mutex();
 Ngs2System* Ngs2FindSystem(Ngs2Handle handle);
 
@@ -169,7 +171,6 @@ void Ngs2SetupAtrac9(Ngs2Voice& voice, const Ngs2WaveformFormat& format);
 std::size_t Ngs2Atrac9BlockBytes(const Ngs2Voice& voice, const Ngs2WaveformBlock& block);
 void Ngs2RestartAtrac9(Ngs2Voice& voice);
 const float* Ngs2Atrac9Frame(Ngs2Voice& voice, Ngs2Block& block, std::uint32_t frame);
-const std::uint8_t* Ngs2PcmPosition(const Ngs2Voice& voice, const Ngs2Block& block, std::uint32_t frame, std::size_t bytes);
 void Ngs2CheckCustomRack(const Ngs2CustomRackOption& option);
 void Ngs2SetupUserFx(Ngs2Rack& rack, const Ngs2CustomRackOption& option);
 void Ngs2CleanupUserFx(Ngs2Rack& rack);
