@@ -35,8 +35,12 @@ inline constexpr std::uint32_t UserDataCapacity = 128u;
 inline constexpr std::uint32_t BufferCapacity = 128u;
 inline constexpr std::uint32_t ImageCapacity = 256u;
 inline constexpr std::uint32_t SampledHeapCapacity = 16u;
-inline constexpr std::uint32_t StorageHeapCapacity = 4u;
-inline constexpr std::uint32_t SamplerHeapCapacity = 16u;
+// Mip views belong to each image; the typed binding must hold multiple image ranges.
+inline constexpr std::uint32_t StorageMipCapacity = 4u;
+inline constexpr std::uint32_t StorageHeapCapacity = 16u;
+// Each guest sampler has normal and comparison variants in the host descriptor heap.
+inline constexpr std::uint32_t SamplerCapacity = 16u;
+inline constexpr std::uint32_t SamplerHeapCapacity = 2u * SamplerCapacity;
 
 struct ResourceMetadata {
     std::uint32_t binding;
@@ -55,7 +59,7 @@ struct ShaderData {
     std::array<std::uint32_t, BufferCapacity / 4u> bufferOffsets;
     std::array<std::uint32_t, 4> dispatchThreadLimit;
     std::array<ResourceMetadata, ImageCapacity> images;
-    std::array<ResourceMetadata, SamplerHeapCapacity> samplers;
+    std::array<ResourceMetadata, SamplerCapacity> samplers;
     std::array<std::uint32_t, 8> exportMappings;
 };
 

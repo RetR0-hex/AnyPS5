@@ -11,6 +11,7 @@
 #include "ControlFlow/RequestSerializer.hpp"
 #include "CacheKey.hpp"
 #include "BdaAbi.hpp"
+#include "RuntimeAbi.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -695,6 +696,25 @@ void TuningFieldTests() {
     }
 }
 
+// CB_BLEND0_CONTROL 0x71010f01 (from Exit 9): color ONE + dst*SRC1_COLOR, separate alpha
+// ONE + dst*SRC1_ALPHA. SRC1 factors map to Vulkan dual-source factors, and the pixel stage info
+// flags dual-source so MRT1 becomes the second blend source; ordinary blending leaves it unset.
+void DualSourceBlendTests() {
+    auto queue = makeState();
+    // Enabled blending also reads CB_BLEND_RED..ALPHA, which the reference state leaves unset.
+    for (std::uint32_t offset = 0x105; offset <= 0x108; ++offset) queue.context[offset] = 0;
+    // SPI_PS_INPUT_ENA/ADDR, as the register-facade test sets them, so pixel info decodes.
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    queue.context[0x1e0] = 0x71010f01u;
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.blends.size() == 1 && state.blends[0].srcColorBlendFactor == VK_BLEND_FACTOR_ONE && state.blends[0].dstColorBlendFactor == VK_BLEND_FACTOR_SRC1_COLOR && state.blends[0].dstAlphaBlendFactor == VK_BLEND_FACTOR_SRC1_ALPHA, "SRC1 blend factors did not decode to dual-source factors");
+    Require(AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state)).dualSourceBlend, "a SRC1 blend did not request dual-source pixel outputs");
+    queue.context[0x1e0] = 0x40010001u;
+    const auto plain = AgcDriver::Graphics::DecodeState(queue);
+    Require(!AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(plain)).dualSourceBlend, "an ordinary blend requested dual-source pixel outputs");
+}
+
 void ReversedComponentOrderTests() {
     for (const auto& [swap, mapping] : {std::pair{2u, 0x1bu}, std::pair{3u, 0x93u}}) {
         auto queue = makeState();
@@ -832,8 +852,14 @@ void DepthStencilTests() {
     queue.context[0x31b] = 4u | (4u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the 3D surface");
     queue.context[0x31b] = 0;
+    // A single-mip 3D target may be DCC compressed (its keys cover every slice); the key address
+    // comes from CB_COLOR0_DCC_BASE like a 2D target's. A mipmapped volume stays unsupported.
     queue.context[0x31c] |= 0x10000000;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DCC 3D color targets");
+    queue.context[0x325] = 0x4321;
+    const auto compressed = AgcDriver::Graphics::DecodeState(queue);
+    Require(compressed.color.depth == 4u && compressed.color.dccAddress == 0x432100u, "a DCC 3D color target did not decode its key address");
+    queue.context[0x3b0] |= 1u << 28u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "mipmapped 3D color targets");
 }
 
 void depthMaintenanceTests() {
@@ -1905,6 +1931,8 @@ struct ModuleShape {
     std::uint32_t parameterLocation = 0;
     bool rectParameters = false;
     bool secondTarget = false;
+    // A dual-source blend's second source: a location 0 output decorated Index 1.
+    bool secondBlendSource = false;
     bool sampleId = false;
     bool layer = false;
     bool fragDepth = false;
@@ -1952,6 +1980,13 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
         emit(declarations, spv::OpVariable, {outputPointer, target, spv::StorageClassOutput});
         emit(annotations, spv::OpDecorate, {target, spv::DecorationLocation, 1});
         extraInterface.push_back(target);
+    }
+    if (shape.secondBlendSource) {
+        const auto source = id();
+        emit(declarations, spv::OpVariable, {outputPointer, source, spv::StorageClassOutput});
+        emit(annotations, spv::OpDecorate, {source, spv::DecorationLocation, 0});
+        emit(annotations, spv::OpDecorate, {source, spv::DecorationIndex, 1});
+        extraInterface.push_back(source);
     }
     if (shape.rectParameters) {
         const auto pointer = id();
@@ -2136,6 +2171,19 @@ void rectListTests() {
     fragment.fragmentParameters = {{0, 0, false, false}, {1, 0, true, false}};
     auto auxiliary = BuildRectListShaders(vertex, fragment, target);
     Require(!auxiliary.control.spirv.empty() && !auxiliary.evaluation.spirv.empty(), "rect-list parameter shaders are empty");
+    // The helpers' fault buffer takes the tessellation-control stage's RuntimeAbi slot, also when
+    // they are built from bare artifacts without binding lists (registry prebuilds); deriving it
+    // from the vertex/fragment bindings once put it on binding 0, over the vertex shader's.
+    {
+        const auto faultSlot = ShaderRecompiler::RuntimeAbi::BindingNumber(ShaderRecompiler::RuntimeAbi::Stage::TessellationControl, ShaderRecompiler::RuntimeAbi::Binding::FaultBuffer);
+        auto bareVertex = vertex;
+        auto bareFragment = fragment;
+        bareVertex.bindings.clear();
+        bareFragment.bindings.clear();
+        for (const auto& prebuilt : {auxiliary, BuildRectListShaders(bareVertex, bareFragment, target)}) {
+            Require(prebuilt.control.bindings.size() == 1 && prebuilt.control.bindings[0].role == DescriptorRole::FaultBuffer && prebuilt.control.bindings[0].binding == faultSlot, "rect-list helper fault buffer left its tessellation-control slot");
+        }
+    }
     auto parameterQueue = makeState();
     parameterQueue.userConfig[0x242] = 17;
     const auto parameterState = DecodeState(parameterQueue);
@@ -2524,6 +2572,106 @@ void pixelParameterSlotTests() {
     expectFailure([&] { recompilePixel({0x423u, 0x3u}, shared); }, "passes its vertices through unchanged");
 }
 
+void clipDistanceTests() {
+    // POS1/POS2 carry compacted clip vectors when the misc vector is absent. Verify the
+    // actual Float32 array stores, replay metadata, and cache identity, not just acceptance.
+    const std::array<std::uint32_t, 7> code{0xf80000cfu, 0u, 0xf80000dfu, 0u, 0xf80008efu, 0u, 0xbf810000u};
+    const std::array<std::uint32_t, 1> capabilities{spv::CapabilityClipDistance};
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Vertex, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.vertex = ShaderRecompiler::ShaderVertexStageInfo{};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.supportedCapabilities = capabilities;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    const ShaderRecompiler::RequestSerializer serializer;
+    std::set<std::vector<std::uint64_t>> keys;
+    for (const auto control : {0x0040000fu, 0x008000f0u, 0x00c000ffu, 0x0060000fu}) {
+        auto queue = makeState();
+        queue.context[0x207] = control;
+        queue.context[0x1b3] = 2;
+        queue.context[0x1b4] = 2;
+        const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
+        Require(rejection.empty(), "clip exports were rejected by the precheck: " + rejection);
+        const auto state = AgcDriver::Graphics::DecodeState(queue);
+        request.context.vertex->paClVsOutCntl = control;
+        const auto replay = serializer.Deserialize(serializer.Serialize(request));
+        Require(replay.request.context.vertex->paClVsOutCntl == control, "clip export routing was lost during replay");
+        std::vector<std::uint64_t> key;
+        ShaderRecompiler::RecompileCacheKey::Build(request, key);
+        keys.insert(key);
+        const auto result = ShaderRecompiler::Recompile(replay.request);
+        const auto& words = result.spirv.Words();
+        std::uint32_t clipVariable = 0;
+        std::set<std::uint32_t> pointers;
+        std::size_t stores = 0;
+        for (std::size_t at = 5; at < words.size(); at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpDecorate && words[at + 2] == spv::DecorationBuiltIn && words[at + 3] == spv::BuiltInClipDistance) clipVariable = words[at + 1];
+            if (op == spv::OpAccessChain && words[at + 3] == clipVariable && clipVariable != 0) pointers.insert(words[at + 2]);
+            if (op == spv::OpStore && pointers.contains(words[at + 1])) ++stores;
+        }
+        Require(clipVariable != 0 && stores == std::popcount(control & 0xffu), "clip planes did not reach the SPIR-V output array");
+        ShaderRecompiler::RecompileResult fragment;
+        fragment.spirv = makeModule({.fragment = true});
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &result, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
+        AgcDriver::Graphics::ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false);
+    }
+    Require(keys.size() == 4, "shader cache aliases distinct clip export routing");
+    request.target.supportedCapabilities = {};
+    expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(request)); }, "shaderClipDistance");
+    auto unsupported = makeState();
+    unsupported.context[0x207] = 0x00400100u;
+    Require(!AgcDriver::Graphics::DrawRejection(unsupported, false).empty(), "cull-distance exports were silently accepted");
+    expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(unsupported)); }, "cull distances");
+    unsupported.context[0x207] = 0x0fu;
+    Require(AgcDriver::Graphics::DrawRejection(unsupported, false).find("CCDIST0") != std::string::npos, "clip planes without a vector were accepted");
+    expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(unsupported)); }, "CCDIST0");
+}
+
+void unsignedColorExportTests() {
+    // UINT16_ABGR packs pairs of integer components, not half floats. Keep its uvec4
+    // interface through pipeline validation and reject mismatched attachment classes.
+    auto queue = makeState();
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    queue.context[0x1c5] = 7;
+    queue.context[0x31c] = (queue.context[0x31c] & ~((0x1fu << 2u) | (7u << 8u))) | (4u << 2u) | (4u << 8u);
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.colors[0].format == VK_FORMAT_R32_UINT, "unsigned color attachment did not retain its numeric type");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "UINT16_ABGR was rejected by the precheck");
+    const std::array<std::uint32_t, 3> code{0xf8001c0fu, 0x00000100u, 0xbf810000u};
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state));
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    const auto result = ShaderRecompiler::Recompile(request);
+    std::size_t extracted = 0;
+    const auto& words = result.spirv.Words();
+    for (std::size_t at = 5; at < words.size(); at += words[at] >> 16u) {
+        if (static_cast<spv::Op>(words[at] & 0xffffu) == spv::OpBitFieldUExtract) ++extracted;
+    }
+    Require(extracted == 4, "packed unsigned export did not extract four 16-bit integer lanes");
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = makeModule({});
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &result, 0}}};
+    const VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false);
+    auto mismatched = state;
+    mismatched.colors[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+    expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, mismatched, subgroup, false); }, "attachment numeric class");
+    queue.context[0x1c5] = 8;
+    expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(queue)); }, "color export format 8");
+}
+
 void validationTests() {
     AgcDriver::Graphics::State state{};
     state.stages.path = AgcDriver::Graphics::ShaderPath::Vertex;
@@ -2569,6 +2717,30 @@ void validationTests() {
         Require(state.colors.empty() && AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false) == std::set<std::uint32_t>{0u}, "an export past the attachments was not dropped");
     }
     {
+        // Location 0 / Index 1 is accepted only when attachment 0 blends with a SRC1 factor and is
+        // the only attachment; the second source is no attachment of its own.
+        ShaderRecompiler::RecompileResult vertex;
+        vertex.spirv = makeModule({});
+        ShaderRecompiler::RecompileResult pixel;
+        pixel.spirv = makeModule({.fragment = true, .secondBlendSource = true});
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}}};
+        const VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        auto dual = state;
+        VkPipelineColorBlendAttachmentState blend{};
+        blend.blendEnable = VK_TRUE;
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR;
+        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_SRC1_ALPHA;
+        dual.blends = {blend};
+        Require(AgcDriver::Graphics::ValidateShaders(shaders, dual, subgroup, false) == std::set<std::uint32_t>{0u}, "a dual-source fragment shader did not validate against a SRC1 blend");
+        dual.blends[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        dual.blends[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, dual, subgroup, false); }, "no SRC1 blend factor");
+        dual.blends = {blend, blend};
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, dual, subgroup, false); }, "more than one color attachment");
+    }
+    {
         ShaderRecompiler::RecompileResult vertex;
         vertex.spirv = makeModule({.vertexInput = true});
         ShaderRecompiler::VertexAttribute attribute{0, 4, {{0x1000, 32u << 16u, 3, 77u << 12u}}, 0};
@@ -2592,6 +2764,29 @@ void validationTests() {
         Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 100, 2) == 16, "zero stride must repeat one value");
         attribute.resource.fields[2] = 8;
         expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "byte range");
+        // Disabled hardware bounds still reject empty descriptors, but NUM_RECORDS=1
+        // must not truncate a constant float4 or bound a strided draw's last fetch.
+        attribute.resource.fields[3] |= 2u << 28u;
+        attribute.resource.fields[2] = 1;
+        Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 100, 2) == 16, "unbounded constant attribute was truncated");
+        Require(AgcDriver::Graphics::VertexBufferExtent(attribute) == 16, "indirect constant attribute was truncated");
+        attribute.fetchIndex = 0;
+        attribute.resource.fields[1] = 32u << 16u;
+        Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 100, 2) == 3216, "disabled bounds checked the record count");
+        attribute.resource.fields[1] = 0;
+        attribute.resource.fields[2] = 0;
+        expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "empty vertex buffer");
+        expectFailure([&] { AgcDriver::Graphics::VertexBufferExtent(attribute); }, "empty vertex buffer");
+        attribute.resource.fields[2] = 1;
+        attribute.resource.fields[3] = 20u << 12u | 2u << 28u;
+        Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 10, 1) == 4 &&
+                AgcDriver::Graphics::VertexBufferExtent(attribute) == 4, "unbounded scalar attribute was truncated");
+        for (const auto mode : {0u, 1u, 3u}) {
+            attribute.resource.fields[3] = 20u << 12u | mode << 28u;
+            expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "byte range");
+        }
+        // The layout checks below expect the per-instance attribute set up before this block.
+        attribute.fetchIndex = 1;
         attribute.resource.fields[3] = 113u << 12u;
         expectFailure([&] { AgcDriver::Graphics::DecodeVertexFormat(attribute); }, "unsupported vertex format");
         attribute.resource.fields[3] = 50u << 12u;
@@ -2894,6 +3089,7 @@ int main() {
         DisabledColorTests();
         CompactedExportTests();
         ReversedComponentOrderTests();
+        DualSourceBlendTests();
         metadataPassTests();
         cmaskTests();
         ShaderStageTests();
@@ -2912,6 +3108,8 @@ int main() {
         meshArgumentTests();
         meshIndexBufferTests();
         validationTests();
+        clipDistanceTests();
+        unsignedColorExportTests();
         vertexCopyTests();
         pixelParameterSlotTests();
         rectListTests();

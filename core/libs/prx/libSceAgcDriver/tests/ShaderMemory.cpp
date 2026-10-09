@@ -11,6 +11,8 @@
 #if ANYPS5_ENABLE_SPIRV_TOOLS
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
+#include "Optimization/ConstantFolder.hpp"
+#include "IntermediateRepresentation/IrBuilder.hpp"
 #include "CacheKey.hpp"
 #include "BdaAbi.hpp"
 #include <spirv/unified1/spirv.hpp>
@@ -20,6 +22,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <map>
+#include <set>
 #include <future>
 #include <memory>
 #include <stdexcept>
@@ -838,7 +841,7 @@ void verifyPixelRequestSerialization() {
                         value.posZ, value.posW, value.frontFace, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping);
+                        value.targetOutputMode, value.targetExportMapping, value.dualSourceBlend);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -878,7 +881,9 @@ void verifyPixelRequestSerialization() {
         .executeOnNoop = true,
         .conservativeZExport = ConservativeZExport::GreaterThanZ,
         .orderedPixelShader = true,
-        .targetOutputMode = {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}
+        .targetOutputMode = {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u},
+        // Version 14: the dual-source flag follows the export mappings and must survive replay.
+        .dualSourceBlend = true
     };
     for (std::uint32_t i = 0; i < pixel.interpolatorSettings.size(); ++i) pixel.interpolatorSettings[i] = 0x10101010u + i;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
@@ -916,12 +921,12 @@ void verifyPixelRequestSerialization() {
     minimal.context.waveSize = 64;
     minimal.context.pixel = ShaderPixelStageInfo{};
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQQ0AAAA=", "new requests did not use serialization version 13");
+    require(requestPrefix(encoded, 8u) == "NVNQQQ4AAAA=", "new requests did not use serialization version 14");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
     for (std::size_t bytes = 0; bytes < 8u; ++bytes) {
-        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated version-12 pixel mapping was accepted");
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated version-14 pixel mapping was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQQ4AAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQQ8AAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
 }
@@ -1036,6 +1041,51 @@ void verifyPixelExportReplay() {
         const auto hit = Recompile(cachedReplay.request);
         require(hit.cacheHit && hit.variantId == cached.variantId, "pixel replay did not reuse the original shader variant");
         verifyResult(cached, hit);
+    }
+}
+
+// Dual-source blending: MRT0 and MRT1 both become location 0 outputs, told apart by Index 0/1 (the
+// SRC and SRC1 blend sources of target 0). Without the flag they keep locations 0 and 1.
+void verifyDualSourceExports() {
+    using namespace ShaderRecompiler;
+    // v_mov_b32 v0..v3 = 0.25, 0.5, 0.75, 1.0; exp mrt0 v0-v3 vm; exp mrt1 v0-v3 done vm; s_endpgm
+    const std::array<std::uint32_t, 13> code{
+        0x7e0002ffu, 0x3e800000u, 0x7e0202ffu, 0x3f000000u,
+        0x7e0402ffu, 0x3f400000u, 0x7e0602ffu, 0x3f800000u,
+        0xf800100fu, 0x03020100u, 0xf800181fu, 0x03020100u, 0xbf810000u
+    };
+    for (const bool dualSource : {false, true}) {
+        ShaderPixelStageInfo pixel{};
+        pixel.targetOutputMode[0] = 9u;
+        pixel.targetOutputMode[1] = 9u;
+        pixel.targetExportMapping.fill(0xe4u);
+        pixel.dualSourceBlend = dualSource;
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
+        request.context.waveSize = 64u;
+        request.context.pixel = pixel;
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 64u;
+        request.layout.pushConstantSizeBytes = 128u;
+        request.useCache = false;
+        const auto result = Recompile(request);
+        const auto& words = result.spirv.Words();
+        std::map<std::uint32_t, std::uint32_t> locations;
+        std::map<std::uint32_t, std::uint32_t> indices;
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+            if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpDecorate) continue;
+            if (words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
+            if (words[at + 2] == spv::DecorationIndex) indices[words[at + 1]] = words[at + 3];
+        }
+        std::multiset<std::pair<std::uint32_t, std::uint32_t>> outputs;
+        for (const auto& [variable, location] : locations) {
+            const auto index = indices.find(variable);
+            outputs.insert({location, index == indices.end() ? 0u : index->second});
+        }
+        const std::multiset<std::pair<std::uint32_t, std::uint32_t>> expected = dualSource ? std::multiset<std::pair<std::uint32_t, std::uint32_t>>{{0u, 0u}, {0u, 1u}} : std::multiset<std::pair<std::uint32_t, std::uint32_t>>{{0u, 0u}, {1u, 0u}};
+        require(outputs == expected, dualSource ? "dual-source MRT exports were not emitted as location 0 Index 0 and 1" : "ordinary MRT exports did not keep locations 0 and 1");
+        require(dualSource || indices.empty(), "ordinary MRT exports carry an Index decoration");
     }
 }
 
@@ -1811,8 +1861,61 @@ void verifyFunctionLdsBound() {
     require(unsized == FunctionLdsDwordLimit, "function LDS: an access without a known width must keep the full array");
 }
 
+// Bounds derived by shader arithmetic fold after the ancillary producer has been visited.
+// Lowering must still recognize both signed and unsigned render-target-index extracts.
+void VerifyFoldedAncillaryBounds() {
+    using namespace ShaderRecompiler;
+    for (const auto opcode : {IrOpcode::BitFieldUExtract, IrOpcode::BitFieldSExtract}) {
+        IrProgram program;
+        auto& block = program.CreateBlock();
+        program.SetEntryBlock(block);
+        program.BlockOrder().push_back(&block);
+        IrBuilder builder(program);
+        builder.SetInsertionPoint(block);
+        auto& ancillary = builder.Emit(IrOpcode::GetBuiltin, IrType::U32, {&builder.Constant(static_cast<std::uint32_t>(StageInputKind::PackedAncillary)), &builder.Constant(0u)});
+        auto& offset = builder.Emit(IrOpcode::IAdd32, IrType::U32, {&builder.Constant(8u), &builder.Constant(8u)});
+        auto& count = builder.Emit(IrOpcode::IAdd32, IrType::U32, {&builder.Constant(5u), &builder.Constant(6u)});
+        auto& extract = builder.Emit(opcode, IrType::U32, {&ancillary, &offset, &count});
+        ConstantFolder{}.Fold(program);
+        const auto* layer = extract.Argument(0)->Resolve();
+        require(layer->Opcode() == IrOpcode::GetBuiltin && layer->Argument(0)->Resolve()->ImmediateU32() == static_cast<std::uint32_t>(StageInputKind::Layer), "folded ancillary bounds did not lower to Layer");
+        require(extract.Argument(1)->Resolve()->ImmediateU32() == 0u && extract.Argument(2)->Resolve()->ImmediateU32() == 11u, "ancillary extraction changed field width or signedness");
+    }
+}
+
+// After a field read is lowered, a packed ancillary VGPR kept only as the inactive-lane arm of a
+// select (EXEC-masked register preservation) is replaced by 0, as in KytyPS5. A raw use keeps it
+// for ShaderInfoCollector to reject, and with no lowered field read nothing is rewritten.
+void VerifyRetainedAncillary() {
+    using namespace ShaderRecompiler;
+    enum class Case { Retained, RawUse, NoFieldRead };
+    for (const auto kind : {Case::Retained, Case::RawUse, Case::NoFieldRead}) {
+        IrProgram program;
+        auto& block = program.CreateBlock();
+        program.SetEntryBlock(block);
+        program.BlockOrder().push_back(&block);
+        IrBuilder builder(program);
+        builder.SetInsertionPoint(block);
+        auto& ancillary = builder.Emit(IrOpcode::GetBuiltin, IrType::U32, {&builder.Constant(static_cast<std::uint32_t>(StageInputKind::PackedAncillary)), &builder.Constant(0u)});
+        if (kind != Case::NoFieldRead) builder.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&ancillary, &builder.Constant(16u), &builder.Constant(11u)});
+        auto& active = builder.Emit(IrOpcode::GetBuiltin, IrType::U1, {&builder.Constant(static_cast<std::uint32_t>(StageInputKind::FrontFacing)), &builder.Constant(0u)});
+        auto& select = builder.Emit(IrOpcode::SelectU32, IrType::U32, {&active, &builder.Constant(7u), &ancillary});
+        IrValue* raw = kind == Case::RawUse ? &builder.Emit(IrOpcode::IAdd32, IrType::U32, {&ancillary, &builder.Constant(1u)}) : nullptr;
+        ConstantFolder{}.Fold(program);
+        const auto* preserved = select.Argument(2)->Resolve();
+        const bool zeroed = preserved->HasImmediate() && preserved->ImmediateU32() == 0u;
+        require(zeroed == (kind == Case::Retained), "a retained packed ancillary arm was normalized in the wrong case");
+        if (raw != nullptr) {
+            const auto* source = raw->Argument(0)->Resolve();
+            require(source->Opcode() == IrOpcode::GetBuiltin && source->Argument(0)->Resolve()->ImmediateU32() == static_cast<std::uint32_t>(StageInputKind::PackedAncillary), "a raw packed ancillary use lost its input");
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        VerifyFoldedAncillaryBounds();
+        VerifyRetainedAncillary();
         using namespace ShaderRecompiler;
         if (argc == 2 && std::string_view(argv[1]) == "--bindless") {
             verifyBindlessTable();
@@ -1833,6 +1936,7 @@ int main(int argc, char** argv) {
         verifyPixelRequestSerialization();
         verifyLegacyPixelRequests();
         verifyPixelExportReplay();
+        verifyDualSourceExports();
         verifyPixelParameterSlots();
         verifyF16PixelParameterSlots();
         verifyComputedTexelOffsets();

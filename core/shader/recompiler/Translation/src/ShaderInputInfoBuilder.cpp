@@ -130,6 +130,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psPosW = pixel.posW;
         pixelStorage.psFrontFace = pixel.frontFace;
         pixelStorage.psAncillary = pixel.ancillary;
+        pixelStorage.psDualSourceBlend = pixel.dualSourceBlend;
         pixelStorage.psNoPerspective = pixel.noPerspective;
         pixelStorage.psPixelKillEnable = pixel.pixelKillEnable;
         pixelStorage.psDepthExportEnable = pixel.depthExportEnable;
@@ -157,6 +158,8 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         auto& vertexStorage = HostThreadLocal<ShaderVertexInputInfo, VertexStorage>();
         vertexStorage = ShaderVertexInputInfo{};
         vertexStorage.logicalStage = _toIrShaderStage(stage);
+        // Preserve the guest export routing: POS1 is not necessarily a misc vector.
+        vertexStorage.paClVsOutCntl = vertex.paClVsOutCntl;
         vertexStorage.fetchEmbedded = vertex.fetchEmbedded;
         vertexStorage.fetchExternal = false;
         vertexStorage.fetchAttribReg = static_cast<int>(vertex.fetchAttribReg);

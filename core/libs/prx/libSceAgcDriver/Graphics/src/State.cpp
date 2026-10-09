@@ -95,9 +95,15 @@ VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueSt
 
 // The register rules DecodeState and DrawRejection share (the precheck must reject exactly what
 // DecodeState would): the masks whose set bits are unsupported, and the depth-control verdict.
-// Render target index, viewport index and the misc export vector that carries them are accepted but
-// not routed: color targets are single-layer, so layered draws land in layer 0.
+// Render target index, viewport index and the misc export vector that carries them are accepted.
+// The render target index becomes the vertex gl_Layer, which selects a slice of a layered 3D color
+// target (ColorTarget::sliceCount). On a single-layer framebuffer a nonzero layer is undefined in
+// Vulkan, whereas the guest clamps to SLICE_MAX; titles seen so far only export a layer when the
+// view spans several slices. The viewport index is not routed.
 constexpr std::uint32_t LayerExports = (1u << 18u) | (1u << 19u) | (1u << 21u) | (1u << 24u);
+// ClipDistance lowering consumes the low eight enable bits and the two CCDIST vector enables.
+// Cull-distance enables remain unsupported until their Vulkan device feature is enabled.
+constexpr std::uint32_t ClipExports = 0xffu | (3u << 22u);
 constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
 // to run, which it always does here.
@@ -310,6 +316,12 @@ VkBlendFactor blendFactor(std::uint32_t value) {
         case 10: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
         case 13: return VK_BLEND_FACTOR_CONSTANT_COLOR;
         case 14: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+        // SRC1 factors read the pixel shader's MRT1 export (dual-source blending, target 0 only).
+        // DecodePixelStageInfo moves MRT1 to location 0 / Index 1 for these draws.
+        case 15: return VK_BLEND_FACTOR_SRC1_COLOR;
+        case 16: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+        case 17: return VK_BLEND_FACTOR_SRC1_ALPHA;
+        case 18: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
         case 19: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
         case 20: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
         default: throw std::runtime_error("AGC graphics: unsupported blend factor " + std::to_string(value));
@@ -523,10 +535,13 @@ State DecodeState(const QueueState& queue) {
         static bool reported = false;
         if (!reported) {
             reported = true;
-            std::fprintf(stderr, "[gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
+            std::fprintf(stderr, "[gpu] vertex layer/viewport index exports in use; layers select 3D target slices, viewport indices are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
         }
     }
-    zero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports");
+    zero(cx, 0x207, ~(LayerExports | ClipExports), "cull distances or auxiliary vertex exports");
+    const auto vertexOutputs = read(cx, 0x207);
+    Require((vertexOutputs & 0x0fu) == 0 || (vertexOutputs & (1u << 22u)) != 0, "clip planes 0-3 require the CCDIST0 vector");
+    Require((vertexOutputs & 0xf0u) == 0 || (vertexOutputs & (1u << 23u)) != 0, "clip planes 4-7 require the CCDIST1 vector");
     {
         const auto depthControl = read(cx, 0x200);
         const auto renderControl = find(cx, 0x000);
@@ -600,14 +615,15 @@ State DecodeState(const QueueState& queue) {
     const auto exportFormat = result.hasColorTarget ? read(cx, 0x1c5) : 0u;
     APS5_LOG_OUT_DEBUG("Export format=%u", exportFormat);
     // SPI_SHADER_POS_FORMAT: POS0 must be a 4-component position; later vectors carry the misc/clip
-    // exports that PA_CL_VS_OUT_CNTL validation above already limits to ignored layer/viewport data.
+    // exports that PA_CL_VS_OUT_CNTL routes to clip planes or ignored layer/viewport data.
     Require((read(cx, 0x1c3) & 0xfu) == 4, "additional position exports are unsupported");
     for (std::uint32_t index = 0; index < exportCount; ++index) {
         const auto slot = exportSlots[index];
         if (!written(slot)) continue;
+        // UINT16_ABGR (7) is lowered to integer lanes; SINT16_ABGR (8) still lacks signed lowering.
         // Export formats only matter for the targets the draw writes.
         const auto slotExport = (exportFormat >> (4u * index)) & 0xfu;
-        if (slotExport == 0 || slotExport == 7 || slotExport == 8 || slotExport > 9) throw std::runtime_error("AGC graphics: color export format " + std::to_string(slotExport) + " is unsupported");
+        if (slotExport == 0 || slotExport == 8 || slotExport > 9) throw std::runtime_error("AGC graphics: color export format " + std::to_string(slotExport) + " is unsupported");
         auto color = DecodeColorBuffer(cx, slot);
         color.exportIndex = index;
         APS5_LOG_OUT_DEBUG("Color %u address=0x%llx extent=%ux%u bytes=%llu VkFormat=%u", slot, static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height, static_cast<unsigned long long>(color.bytes), static_cast<unsigned>(color.format));
@@ -715,6 +731,18 @@ std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height) {
     return ((width + metablockWidth - 1) / metablockWidth) * ((height + metablockHeight - 1) / metablockHeight) * metablockBytes;
 }
 
+std::uint32_t FramebufferLayers(const State& state) {
+    std::uint32_t layers = 1;
+    for (const auto& color : state.colors) layers = std::max(layers, color.sliceCount);
+    if (layers == 1) return 1;
+    // Vulkan needs every attachment to cover the framebuffer's layers. Mixed slice counts would
+    // need per-target clamping the guest does but Vulkan cannot, and depth surfaces are single
+    // layer, so only uniformly layered color-only draws are supported.
+    Require(std::all_of(state.colors.begin(), state.colors.end(), [&](const ColorTarget& color) { return color.sliceCount == layers; }), "layered color targets with different slice counts are unsupported");
+    Require(!state.depth.has_value(), "layered color targets with a depth target are unsupported");
+    return layers;
+}
+
 std::uint32_t ColorWriteMask(const Registers& context) {
     auto mask = read(context, 0x8e) & read(context, 0x8f);
     for (std::uint32_t slot = 0; slot < 8; ++slot) {
@@ -755,8 +783,12 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
     const auto view = read(cx, 0x31b + stride);
     Require((view & ~0x3fffffffu) == 0, "reserved CB_COLOR_VIEW bits are set");
+    // CB_COLOR_VIEW selects slices [SLICE_START, SLICE_MAX]. The vertex stage's render target
+    // index (relative to SLICE_START) picks one per primitive; without that export every
+    // primitive lands on SLICE_START. Only 3D targets accept a range (see the volume branch).
     const auto slice = view & 0x1fffu;
-    Require(slice == ((view >> 13u) & 0x1fffu), "color views of several array slices are unsupported");
+    const auto sliceMax = (view >> 13u) & 0x1fffu;
+    Require(sliceMax >= slice, "the color view's last slice precedes its first");
     const auto viewMip = (view >> 26u) & 0xfu;
     const auto attrib = read(cx, 0x31d + stride);
     zero(cx, 0x31d + stride, ~0x0001f000u, "reserved color target attributes");
@@ -775,9 +807,19 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require(color.samples == 1 || (maxMip == 0 && !volume && slice == 0), "multisampling of mipmapped, 3D or array color targets is unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
-        Require(maxMip == 0 && (info & 0x10000000u) == 0, "mipmapped or DCC 3D color targets are unsupported");
+        // DCC on a single-mip volume is modeled like a 2D target's: 3D targets always render into
+        // the resident image of the whole surface (SurfaceForTarget), whose writeback marks the
+        // keys of every slice uncompressed (DccKeyCount covers all of guestBytes for 3D), so later
+        // samplers read the rendered texels. KytyPS5 likewise sizes 3D DCC over all slices.
+        Require(maxMip == 0, "mipmapped 3D color targets are unsupported");
         Require(slice < color.depth, "the color view slice is beyond the 3D surface");
         color.depthSlice = slice;
+        // Titles program SLICE_MAX one past the last slice when building a whole LUT (32 for a
+        // depth-32 volume); the hardware clamps the render target index to the surface, so the
+        // attachable range ends at its last slice.
+        color.sliceCount = std::min(sliceMax, color.depth - 1u) - slice + 1u;
+    } else {
+        Require(slice == sliceMax, "color views of several array slices are unsupported outside 3D targets");
     }
     color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
     color.elementBytes = decoded.elementBytes;
@@ -906,7 +948,11 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
         if (value(queue.userConfig, 0x242, primitive) && (primitive & 0x3fu) != 1 && (primitive & 0x3fu) != 2 && (primitive & 0x3fu) != 3 && (primitive & 0x3fu) != 4 && (primitive & 0x3fu) != 5 && (primitive & 0x3fu) != 6) return "AGC graphics: primitive restart is only supported for point, line and triangle topologies";
         if (value(cx, 0x103, resetIndex) && (resetIndex & 0xffffu) != 0xffffu) return "AGC graphics: primitive restart index other than all ones is unsupported";
     }
-    if (auto reason = nonzero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x207, ~(LayerExports | ClipExports), "cull distances or auxiliary vertex exports"); !reason.empty()) return reason;
+    if (value(cx, 0x207, word)) {
+        if (auto reason = require((word & 0x0fu) == 0 || (word & (1u << 22u)) != 0, "clip planes 0-3 require the CCDIST0 vector"); !reason.empty()) return reason;
+        if (auto reason = require((word & 0xf0u) == 0 || (word & (1u << 23u)) != 0, "clip planes 4-7 require the CCDIST1 vector"); !reason.empty()) return reason;
+    }
     if (value(cx, 0x200, word)) {
         const bool surface = (word & 0xbu) != 0 && depthSurfaceBound(cx);
         if (!surface && !((word & 3u) != 0 && depthPlanesAbsent(cx)) && !depthPassThrough(word) && !IgnoreDepthTest() && (effectiveDepthControl(word) & DepthControlMask) != 0) return zeroMessage(0x200, word, "depth, stencil or conditional color writes");

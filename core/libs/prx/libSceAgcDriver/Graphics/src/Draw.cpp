@@ -547,7 +547,7 @@ std::set<std::uint32_t> CachedFragmentOutputs(const Context& context, std::span<
     }
     std::set<std::uint32_t> outputs;
     try {
-        outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing, context.imageInt64Atomics, context.geometryShader, context.sampleRateShading);
+        outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing, context.imageInt64Atomics, context.geometryShader, context.sampleRateShading, context.vertexLayer);
     } catch (const std::exception& error) {
         if (keyed) {
             std::lock_guard lock(validationMutex());
@@ -1572,7 +1572,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (binding.resident != nullptr) {
             timer.phase(PhaseReadTarget);
             binding.proxied = AttachmentProxyFormat(context, color.format) != VK_FORMAT_UNDEFINED;
-            targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice));
+            // The proxy is a single-layer image, so a layered draw cannot render through it.
+            Require(!binding.proxied || color.sliceCount == 1, "layered rendering into a proxied color format is unsupported");
+            targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice, color.sliceCount));
             continue;
         }
         Require(color.samples == 1, "multisample draws require cached resident color targets");
@@ -1747,7 +1749,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     std::vector<std::shared_ptr<StorageTexture>> owners;
     owners.reserve(targets.size());
     for (const auto& binding : targets) owners.push_back(binding.resident);
-    auto framebuffer = pipeline->AcquireFramebuffer(targetViews, owners, state.renderExtent);
+    auto framebuffer = pipeline->AcquireFramebuffer(targetViews, owners, state.renderExtent, FramebufferLayers(state));
     timer.phase(PhasePipeline);
     APS5_LOG_CHARS_OUT_DEBUG("Pipeline created");
     if (lean) {
@@ -2113,7 +2115,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     auto pipeline = recipe.pipeline.lock();
     if (pipeline == nullptr) return miss(DrawRecipeMiss::ObjectsGone);
     auto framebuffer = recipe.framebuffer.lock();
-    if (framebuffer == nullptr) framebuffer = pipeline->AcquireFramebuffer(recipe.targetViews, targets, state.renderExtent);
+    if (framebuffer == nullptr) framebuffer = pipeline->AcquireFramebuffer(recipe.targetViews, targets, state.renderExtent, FramebufferLayers(state));
     timer.phase(PhasePipeline);
     const auto recordStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     RecordedDraw record;

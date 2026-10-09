@@ -85,6 +85,12 @@ int main() {
             return 1;
         }
         requireStructuredBranches(nested, "nested selections");
+        // Both arms may break or continue, and an earlier edge bypasses their continue join.
+        // The selection needs its own gateway within this iteration, without repeated exit splits.
+        auto mixedExits = makeGraph({{1}, {2, 9}, {3, 8}, {4, 6}, {5, 9}, {8}, {7, 8}, {8, 9}, {1}, {}});
+        Structurizer{}.Structurize(mixedExits);
+        requireStructuredBranches(mixedExits, "a selection with breaks and continues in both arms");
+        if (mixedExits.blocks.size() > 20) throw std::runtime_error("loop exit gateways grew repeatedly");
         auto exitTail = makeGraph({{1}, {2}, {3, 4}, {6}, {6, 5}, {1}, {}});
         Structurizer{}.Structurize(exitTail);
         requireStructuredBranches(exitTail, "a loop exit through a tail block");

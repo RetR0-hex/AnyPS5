@@ -132,6 +132,9 @@ struct ShaderPixelStageInfo {
     bool orderedPixelShader;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
+    // Color target 0 blends with a SRC1 factor (CB_BLEND0_CONTROL factors 15-18): MRT1 is not a
+    // separate target but the second blend source, so it shares location 0 with MRT0 (Index 1).
+    bool dualSourceBlend = false;
 };
 
 struct ShaderVertexBufferResource {
@@ -153,6 +156,8 @@ struct ShaderVertexStageInfo {
     std::uint32_t fetchAttribReg;
     std::uint32_t fetchBufferReg;
     bool fetchEmbedded;
+    // PA_CL_VS_OUT_CNTL identifies which auxiliary position vectors carry user clip planes.
+    std::uint32_t paClVsOutCntl = 0;
 };
 
 struct ShaderFloatMode {

@@ -318,6 +318,11 @@ void DefineOutputs(SpirvEmitterState& state) {
             const auto type = uintOutput ? TypeU32Vector(state, 4u) : TypeF32Vector(state, 4u);
             binding.variableId = DefineInterfaceVariable(state, type, spv::StorageClassOutput, binding.debugName.c_str());
             state.module.AddAnnotation(spv::OpDecorate, binding.variableId, spv::DecorationLocation, binding.location);
+            // Dual-source blending: MRT0 and MRT1 both sit at location 0 and Vulkan selects the
+            // blend source (SRC vs SRC1 factors) by the Index decoration.
+            if (binding.kind == StageOutputKind::Mrt && state.program.Resources().stage == IrShaderStage::Pixel && PixelInfo(state).psDualSourceBlend) {
+                state.module.AddAnnotation(spv::OpDecorate, binding.variableId, spv::DecorationIndex, binding.index);
+            }
             break;
         }
         }

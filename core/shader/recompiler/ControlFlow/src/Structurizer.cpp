@@ -1,5 +1,7 @@
 #include "ControlFlow/Structurizer.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -327,6 +329,48 @@ std::vector<std::uint32_t> linearTail(const ControlFlowGraph& graph, std::uint32
     return tail;
 }
 
+std::uint32_t iterationContinueMerge(const ControlFlowGraph& graph, const NaturalLoop& loop, std::uint32_t first, std::uint32_t second) {
+    // Break edges terminate this selection's iteration. Ignore them when finding the
+    // join of continuing paths, so a later iteration's exit never becomes its merge.
+    std::vector<bool> continuing(graph.blocks.size(), false);
+    std::vector<std::uint32_t> pending{loop.continueBlock};
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        if (id == loop.headerBlock || id == loop.mergeBlock || continuing[id]) continue;
+        continuing[id] = true;
+        for (const auto predecessor : graph.FindBlock(id).predecessors)
+            if (contains(loop.blocks, predecessor)) pending.push_back(predecessor);
+    }
+    if (!continuing[first] || !continuing[second]) return InvalidControlFlowId;
+    std::vector<std::uint32_t> all;
+    for (std::uint32_t id = 0; id < continuing.size(); ++id) if (continuing[id]) all.push_back(id);
+    std::vector<std::vector<std::uint32_t>> post(graph.blocks.size());
+    for (const auto id : all) post[id] = id == loop.continueBlock ? std::vector<std::uint32_t>{id} : all;
+    bool changed;
+    do {
+        changed = false;
+        for (auto it = all.rbegin(); it != all.rend(); ++it) {
+            const auto id = *it;
+            if (id == loop.continueBlock) continue;
+            std::vector<std::uint32_t> next;
+            bool initial = true;
+            for (const auto successor : graph.FindBlock(id).successors) {
+                if (!continuing[successor]) continue;
+                next = initial ? post[successor] : intersectSorted(next, post[successor]);
+                initial = false;
+            }
+            const auto position = std::lower_bound(next.begin(), next.end(), id);
+            if (position == next.end() || *position != id) next.insert(position, id);
+            if (next != post[id]) { post[id] = std::move(next); changed = true; }
+        }
+    } while (changed);
+    const auto common = intersectSorted(post[first], post[second]);
+    for (const auto candidate : common)
+        if (std::all_of(common.begin(), common.end(), [&](auto other) { return contains(post[candidate], other); })) return candidate;
+    return InvalidControlFlowId;
+}
+
 std::uint32_t mergeBesideReturns(const ControlFlowGraph& graph, const BasicBlock& header) {
     const auto reach = [&](std::uint32_t start) {
         std::vector<std::uint32_t> reached;
@@ -477,6 +521,12 @@ std::uint32_t findSelectionMerge(const ControlFlowGraph& graph, const BasicBlock
     if (joinsAt(falseTarget, trueTarget)) {
         return falseTarget;
     }
+
+    // A global post-dominator can be reached only after a later loop iteration.
+    // Close continuing paths at their join within this iteration; breaks may
+    // legally bypass that selection merge to the enclosing loop merge.
+    if (!isInsideLoopConstruct(graph, *loop, globalMerge))
+        if (const auto merge = iterationContinueMerge(graph, *loop, trueTarget, falseTarget); merge != InvalidControlFlowId) return merge;
     if (globalMerge != InvalidControlFlowId) {
         const bool trueJoins = reachesWithinIteration(graph, *loop, trueTarget, globalMerge);
         const bool falseJoins = reachesWithinIteration(graph, *loop, falseTarget, globalMerge);
@@ -583,6 +633,7 @@ bool splitSharedMergeBlock(ControlFlowGraph& graph, std::uint32_t merge, const s
     if (constructPredecessors.empty() || (!forceSplit && !hasExternalPredecessor)) {
         return false;
     }
+
 
     const auto syntheticMerge = appendSyntheticBranchBlock(graph, merge);
     auto& syntheticBlock = graph.FindBlock(syntheticMerge);
@@ -1535,6 +1586,9 @@ void Structurizer::splitSharedMergeBlocks(ControlFlowGraph& graph) const {
     const auto programWords = estimatedSpirvWords(graph, allBlockIds(originalBlockCount));
     SplitBudget budget{programWords, std::max(CloneWordLimit, programWords / CloneBudgetDivisor), std::max(CloneWordLimit, programWords), nextGotoVariable(graph)};
     for (std::uint32_t splits = 0; splits < splitBudget; ++splits) {
+        // Report progress before analysis so pathological rewrites remain diagnosable while running.
+        if (std::getenv("APS5_TRACE_CFG") != nullptr && splits % 32u == 0)
+            std::fprintf(stderr, "[cfg] merge split %u/%u: %zu blocks (initial %u)\n", splits, splitBudget, graph.blocks.size(), originalBlockCount);
         if (!splitOneLoopMerge(graph) && !splitOneSelectionMerge(graph, budget, [this](ControlFlowGraph& candidate) { recomputeAnalyses(candidate); }) && !splitOneReturnJoin(graph)) {
             return;
         }

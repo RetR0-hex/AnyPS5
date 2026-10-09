@@ -28,6 +28,8 @@ struct DrawProgram {
 struct DrawDecode {
     Graphics::State state;
     ShaderRecompiler::ShaderPixelStageInfo pixel;
+    // Capture clip/misc-vector routing from the active context, including link-time overrides.
+    std::uint32_t paClVsOutCntl = 0;
     std::vector<DrawProgram> programs;
     std::vector<ShaderRecompiler::ProgramRole> roles;
 };

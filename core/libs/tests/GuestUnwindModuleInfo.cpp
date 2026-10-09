@@ -6,6 +6,7 @@
 #include <windows.h>
 
 extern "C" int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleInfoForUnwind* info);
+extern "C" int APS5_VABI sceKernelGetModuleInfoFromAddr(uint64_t addr, int flags, ModuleInfoEx* info);
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -14,6 +15,20 @@ static bool Throws(std::uint64_t address) {
     try {
         sceKernelGetModuleInfoForUnwind(address, 0, &info);
     } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+static bool ExtendedThrows(std::uint64_t address) {
+    ModuleInfoEx info{};
+    info.st_size = sizeof(info);
+    info.id = -123;
+    try {
+        sceKernelGetModuleInfoFromAddr(address, 2, &info);
+    } catch (const std::runtime_error&) {
+        // Invalid metadata must not publish a partially populated guest result.
+        Require(info.id == -123 && info.segment_count == 0);
         return true;
     }
     return false;
@@ -38,6 +53,33 @@ int main() {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     Require(info.seg0_size == nt->OptionalHeader.SizeOfImage);
+
+    // Both module queries must identify the same image and its relocated guest DWARF data.
+    ModuleInfoEx extended{};
+    extended.st_size = sizeof(extended);
+    Require(sceKernelGetModuleInfoFromAddr(address, 2, &extended) == 0);
+    Require(extended.segment_count > 0 && extended.segment_count <= 4 && extended.ref_count == 1);
+    Require(extended.eh_frame_hdr_addr == info.eh_frame_hdr_addr && extended.eh_frame_hdr_size == 12);
+    Require(extended.eh_frame_addr == info.eh_frame_addr && extended.eh_frame_size == info.eh_frame_size + 4);
+    ModuleInfoEx again{};
+    again.st_size = sizeof(again);
+    Require(sceKernelGetModuleInfoFromAddr(address + 1, 2, &again) == 0 && again.id == extended.id);
+    int local = 0;
+    again.st_size = sizeof(again);
+    Require(sceKernelGetModuleInfoFromAddr(reinterpret_cast<std::uint64_t>(&local), 2, &again) != 0);
+    Require(sceKernelGetModuleInfoFromAddr(address, 2, nullptr) != 0);
+
+    // A valid frame pointer does not make an unsupported or oversized search table valid.
+    fixture->header.countEncoding = 0x0b;
+    Require(ExtendedThrows(address));
+    fixture->header.countEncoding = 0x03;
+    fixture->header.tableEncoding = 0x1b;
+    Require(ExtendedThrows(address));
+    fixture->header.tableEncoding = 0x3b;
+    fixture->header.count = 0xffffffffu;
+    Require(ExtendedThrows(address));
+    fixture->header.count = 0;
+    Require(!ExtendedThrows(address));
 
     fixture->header.version = 2;
     Require(Throws(address));

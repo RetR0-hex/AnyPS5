@@ -83,6 +83,12 @@ are copied from the executable directory into the run directory. Old files are
 excluded. This mode produces
 large logs and affects timing.
 
+For a shader front-end stall, set `APS5_DUMP_CFG=all` (or a hexadecimal shader
+address) to log the input control-flow graph before structurization. Set
+`APS5_TRACE_CFG=1` to report merge-splitting progress; the debug-heavy runner
+enables this trace automatically. These diagnostics work before IR generation,
+so they can expose a rewrite that never reaches the existing IR dump.
+
 On Windows, the runner also saves periodic thread contexts, frame pointer chains,
 stack address candidates and captures of the launched process's window. Guest
 code addresses include the module offset and guest virtual address. Stack address

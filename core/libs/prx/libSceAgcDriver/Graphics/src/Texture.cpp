@@ -691,7 +691,7 @@ VkFormat AttachmentProxyFormat(const Context& context, VkFormat format) {
     return proxy;
 }
 
-StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel) : context(context), detiler(detiler), descriptor(descriptor) {
+StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel, bool initializeFromGuest) : context(context), detiler(detiler), descriptor(descriptor) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
     try {
@@ -760,7 +760,28 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory storage");
         if (descriptor.samples > 1) view = createView(mipLevel, false, storageFormat);
         uploadReason = "first";
-        upload();
+        if (initializeFromGuest) upload();
+        else {
+            // The source is GPU-resident and may be newer than all guest bytes. Only establish
+            // the layout here; the caller records a complete transfer before exposing the image.
+            Require(descriptor.samples == 1, "GPU-initialized storage requires one sample");
+            original.resize(static_cast<std::size_t>(guestBytes));
+            originalValid = false;
+            auto* recorder = Recorder::Active();
+            std::unique_ptr<CommandBatch> batch;
+            if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
+            const auto commands = recorder != nullptr ? recorder->Commands() : batch->Handle();
+            VkImageMemoryBarrier ready{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            ready.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            ready.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready.image = image;
+            ready.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, geometry.imageLayers};
+            context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ready);
+            if (batch) batch->SubmitAndWait();
+        }
         defaultMip = mipLevel;
         if (view == VK_NULL_HANDLE) view = createView(mipLevel, false, storageFormat);
         {
@@ -1032,25 +1053,29 @@ VkImageView StorageTexture::createView(std::uint32_t mip, bool firstLayer, VkFor
     return created;
 }
 
-VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, std::uint32_t depthSlice) {
+VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, std::uint32_t depthSlice, std::uint32_t sliceCount) {
     Require(attachable, "storage image cannot be a color attachment");
     Require(mip < descriptor.mipCount, "attachment mip exceeds the storage image");
     const bool volume = descriptor.dimension == TextureDimension::k3D;
     Require(depthSlice == 0 || (volume && mip == 0 && depthSlice <= descriptor.depthOrLastArray), "attachment slice is outside the storage image");
-    const auto found = attachmentViews.find({format, mip, depthSlice});
+    // 3D images are created 2D_ARRAY_COMPATIBLE, so slices can be attached as array layers; a
+    // layered draw's gl_Layer then indexes from depthSlice, as the render target index does
+    // from SLICE_START on the guest.
+    Require(sliceCount >= 1 && (sliceCount == 1 || (volume && mip == 0 && depthSlice + sliceCount - 1u <= descriptor.depthOrLastArray)), "attachment slice range is outside the storage image");
+    const auto found = attachmentViews.find({format, mip, depthSlice, sliceCount});
     if (found != attachmentViews.end()) return found->second;
     VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
     usage.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     viewInfo.pNext = &usage;
     viewInfo.image = image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.viewType = sliceCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
     viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1u, volume ? depthSlice : descriptor.baseArray, 1u};
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1u, volume ? depthSlice : descriptor.baseArray, sliceCount};
     VkImageView created = VK_NULL_HANDLE;
     Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &created), "vkCreateImageView attachment");
-    attachmentViews.emplace(std::tuple{format, mip, depthSlice}, created);
+    attachmentViews.emplace(std::tuple{format, mip, depthSlice, sliceCount}, created);
     return created;
 }
 

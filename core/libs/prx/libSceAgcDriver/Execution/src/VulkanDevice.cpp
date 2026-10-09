@@ -196,6 +196,8 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool geometryShader = false;
     bool sampleRateShading = false;
+    // VK_EXT_shader_viewport_index_layer: vertex-stage gl_Layer for layered color targets.
+    bool vertexLayer = false;
     bool shaderStorageImageMultisample = false;
     bool shaderClock = false;
     bool narrowSubgroupClock = false;
@@ -800,6 +802,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->capabilities.push_back(spv::CapabilityShaderClockKHR);
         state->spirvExtensions.push_back("SPV_KHR_shader_clock");
     }
+    // Layered rendering (a 3D LUT built one slice per primitive) writes gl_Layer from the vertex
+    // stage. On a Vulkan 1.1 device that output comes only from this extension, which has no
+    // feature struct: enabling it is enough. The recompiler refuses the export without it.
+    state->vertexLayer = hasExtension(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+    if (state->vertexLayer) {
+        deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityShaderViewportIndexLayerEXT);
+        state->spirvExtensions.push_back("SPV_EXT_shader_viewport_index_layer");
+    }
     VkPhysicalDeviceShaderAtomicInt64FeaturesKHR atomicInt64Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR};
     if (hasExtension(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
         VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &atomicInt64Features};
@@ -960,6 +971,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.depthBounds = available.depthBounds;
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
+    // CB_BLEND factors 15-18 (SRC1_*) need dual-source blending; desktop GPUs expose it, and a
+    // device without it fails only the pipelines of draws that blend with MRT1.
+    enabled.dualSrcBlend = available.dualSrcBlend;
     state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
@@ -984,6 +998,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->shaderStorageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
     if (enabled.geometryShader) state->capabilities.push_back(spv::CapabilityGeometry);
     enabled.shaderClipDistance = available.shaderClipDistance;
+    // Clip-plane exports require both the enabled device feature and a compiler capability.
+    if (enabled.shaderClipDistance) state->capabilities.push_back(spv::CapabilityClipDistance);
     if (enabled.shaderStorageImageWriteWithoutFormat) state->capabilities.push_back(spv::CapabilityStorageImageWriteWithoutFormat);
     if (enabled.shaderStorageImageReadWithoutFormat) state->capabilities.push_back(spv::CapabilityStorageImageReadWithoutFormat);
     // Bindless image tables index an image array with a wave-uniform runtime slot.
@@ -2541,7 +2557,8 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.imageInt64Atomics = state->imageInt64Atomics;
     context.geometryShader = state->geometryShader;
     context.sampleRateShading = state->sampleRateShading;
-    // Report independent device capabilities for multisample transfers and null bindings.
+    // Report independent capabilities for vertex layers, multisample transfers, and null bindings.
+    context.vertexLayer = state->vertexLayer;
     context.shaderStorageImageMultisample = state->shaderStorageImageMultisample;
     context.nullDescriptors = state->shaderProfile != nullptr && state->shaderProfile->NullDescriptors();
     context.primitiveListRestart = state->primitiveListRestart;

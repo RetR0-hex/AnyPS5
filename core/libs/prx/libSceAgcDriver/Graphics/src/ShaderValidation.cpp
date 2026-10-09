@@ -13,12 +13,34 @@
 namespace AgcDriver::Graphics {
 namespace {
 
+// Validated-output key of a dual-source blend's second source (location 0, Index 1). It lies
+// above the 256 locations and the 0x10000 patch flag, so it never names an attachment.
+constexpr std::uint32_t DualSourceLocationKey = 0x20000u;
+
+bool isSrc1Factor(VkBlendFactor factor) {
+    return factor == VK_BLEND_FACTOR_SRC1_COLOR || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR || factor == VK_BLEND_FACTOR_SRC1_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+}
+
+// Whether the pipeline blends with SRC1 factors. Vulkan allows that only on attachment 0 with
+// maxFragmentDualSrcAttachments (1 on current desktop drivers) attachments in total.
+bool DualSourceBlend(const State& state) {
+    for (const auto& blend : state.blends) {
+        if (blend.blendEnable && (isSrc1Factor(blend.srcColorBlendFactor) || isSrc1Factor(blend.dstColorBlendFactor) || isSrc1Factor(blend.srcAlphaBlendFactor) || isSrc1Factor(blend.dstAlphaBlendFactor))) {
+            Require(state.blends.size() == 1u, "dual-source blending with more than one color attachment");
+            return true;
+        }
+    }
+    return false;
+}
+
 struct Decoration {
     std::optional<std::uint32_t> location;
     std::optional<std::uint32_t> builtin;
     std::optional<std::uint32_t> set;
     std::optional<std::uint32_t> binding;
     std::optional<std::uint32_t> stride;
+    // Fragment output blend-source index (dual-source blending); absent means Index 0.
+    std::optional<std::uint32_t> index;
     bool block = false;
     bool patch = false;
     bool perPrimitive = false;
@@ -43,6 +65,9 @@ struct Module {
     bool position = false;
     bool primitiveIndices = false;
     bool fragmentBarycentric = false;
+    // Set from the ShaderViewportIndexLayerEXT capability, which is only accepted on devices with
+    // VK_EXT_shader_viewport_index_layer; it permits the vertex gl_Layer output.
+    bool vertexLayer = false;
     std::map<std::uint32_t, std::vector<std::uint32_t>> modes;
 
     const std::vector<std::uint32_t>& Type(std::uint32_t id) const {
@@ -86,6 +111,13 @@ struct Module {
         const bool vertex = stage == Stage::Vertex || stage == Stage::Local;
         const bool input = storage == spv::StorageClassInput;
         const auto& raw = Type(type);
+        if (!input && value == spv::BuiltInClipDistance && vertex) {
+            // The rasterizer consumes a Float32 array with at most eight guest clip planes.
+            Require(raw.size() == 4 && (raw[0] & 0xffffu) == spv::OpTypeArray && Signature(raw[2]) == "f32", "invalid clip-distance output type");
+            const auto count = constants.find(raw[3]);
+            Require(count != constants.end() && count->second != 0 && count->second <= 8, "invalid clip-distance output count");
+            return;
+        }
         if (value == spv::BuiltInBaryCoordKHR || value == spv::BuiltInBaryCoordNoPerspKHR) {
             Require(fragmentBarycentric && stage == Stage::Fragment && input && Signature(type) == "f32x3", "invalid barycentric built-in: expected fragment Float32 vec3 input with FragmentBarycentricKHR");
             return;
@@ -120,6 +152,9 @@ struct Module {
         const auto signature = Signature(type);
         if (vertex && storage == spv::StorageClassInput) {
             Require((value == spv::BuiltInVertexIndex || value == spv::BuiltInInstanceIndex) && signature == "i32", "unsupported vertex built-in input");
+        } else if (vertex && storage == spv::StorageClassOutput && value == spv::BuiltInLayer) {
+            // The render target index selects one slice of a layered color target.
+            Require(vertexLayer && (signature == "u32" || signature == "i32"), "vertex gl_Layer output requires VK_EXT_shader_viewport_index_layer");
         } else if (vertex && storage == spv::StorageClassOutput) {
             Require(value == spv::BuiltInPosition && signature == "f32x4" && !position, "unsupported or duplicate vertex built-in output");
             position = true;
@@ -129,7 +164,7 @@ struct Module {
     }
 };
 
-Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading) {
+Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool vertexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -178,6 +213,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragmentShaderBarycentric, "device does not support enabled VK_KHR_fragment_shader_barycentric with fragmentShaderBarycentric");
                     module.fragmentBarycentric = true;
                 }
+                if (capability == spv::CapabilityShaderViewportIndexLayerEXT) {
+                    Require(vertex && vertexLayer, "ShaderViewportIndexLayerEXT requires enabled VK_EXT_shader_viewport_index_layer in a vertex shader");
+                    module.vertexLayer = true;
+                }
                 VkSubgroupFeatureFlags subgroupOperations = 0;
                 switch (capability) {
                     case spv::CapabilityGroupNonUniform: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT; break;
@@ -220,6 +259,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityImage1D ||
                     capability == spv::CapabilityImageGatherExtended ||
                     capability == spv::CapabilityImageQuery ||
+                    (vertex && capability == spv::CapabilityClipDistance) ||
+                    // Vertex gl_Layer for layered color targets (VK_EXT_shader_viewport_index_layer).
+                    (vertex && vertexLayer && capability == spv::CapabilityShaderViewportIndexLayerEXT) ||
                     (fragment && geometryShader && capability == spv::CapabilityGeometry) ||
                     (fragment && sampleRateShading && capability == spv::CapabilitySampleRateShading) ||
                     capability == spv::CapabilityImageMSArray ||
@@ -268,6 +310,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 const std::string_view extension(text, static_cast<std::size_t>(end - text));
                 if (extension == "SPV_EXT_fragment_shader_interlock") {
                     Require(fragment, "SPV_EXT_fragment_shader_interlock requires a fragment shader");
+                    break;
+                }
+                if (extension == "SPV_EXT_shader_viewport_index_layer") {
+                    Require(vertex && vertexLayer, "SPV_EXT_shader_viewport_index_layer requires enabled VK_EXT_shader_viewport_index_layer in a vertex shader");
                     break;
                 }
                 if (extension == "SPV_KHR_fragment_shader_barycentric") {
@@ -323,7 +369,13 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(!field->has_value(), "duplicate SPIR-V decoration");
                     *field = instruction[3];
                 }
-                Require(kind != spv::DecorationComponent && kind != spv::DecorationIndex && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
+                if (kind == spv::DecorationIndex) {
+                    // Only dual-source fragment outputs carry Index; the interface pass checks
+                    // that the pipeline really blends with SRC1 factors.
+                    Require(fragment && count == 4 && instruction[3] <= 1u && !decoration.index.has_value(), "invalid fragment output Index decoration");
+                    decoration.index = instruction[3];
+                }
+                Require(kind != spv::DecorationComponent && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
                 if (kind == spv::DecorationPatch) decoration.patch = true;
                 if (kind == spv::DecorationPerPrimitiveEXT) decoration.perPrimitive = true;
                 if (kind == spv::DecorationPerVertexKHR) {
@@ -434,7 +486,15 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 Require(!decoration.perPrimitive, "per-primitive user outputs are unsupported");
                 Require(!decoration.builtin, "shader input cannot have both location and built-in decorations");
                 auto& locations = variable.storage == spv::StorageClassInput ? module.inputs : module.outputs;
-                module.AddLocations(locations, *decoration.location, typeId, decoration.patch);
+                if (decoration.index.value_or(0u) == 1u) {
+                    // The second blend source shares location 0 with MRT0 but is no attachment of
+                    // its own; key it apart so it neither collides with nor counts as location 0.
+                    Require(variable.storage == spv::StorageClassOutput && *decoration.location == 0u && (type[0] & 0xffffu) != spv::OpTypeArray, "Index 1 fragment output must be a single location-0 output");
+                    Require(DualSourceBlend(state), "fragment shader writes a second blend source but no SRC1 blend factor uses it");
+                    Require(locations.emplace(DualSourceLocationKey, "vertex:" + module.Signature(typeId)).second, "duplicate second blend source");
+                } else {
+                    module.AddLocations(locations, *decoration.location, typeId, decoration.patch);
+                }
             } else if (decoration.builtin) {
                 module.Builtin(*decoration.builtin, typeId, variable.storage, stage, subgroup);
             } else {
@@ -519,7 +579,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
 
 }
 
-std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading) {
+std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool vertexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -535,7 +595,7 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
         Require(shaders[i].program != nullptr, "missing compiled shader");
         Require(shaders[i].stage == expected, "graphics stage order disagrees");
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == 0, "graphics resource uses a descriptor set other than zero");
-        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading);
+        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading, vertexLayer);
         if (i != 0) {
             for (const auto& [location, signature] : current.inputs) {
                 const auto output = previous.outputs.find(location);
@@ -553,7 +613,15 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
     std::set<std::uint32_t> locations;
     for (const auto& [location, signature] : previous.outputs) {
         if (location >= attachments) continue;
-        Require(signature == "vertex:f32x4", "fragment shader must export float4 colors to its attachments");
+        const auto color = std::find_if(state.colors.begin(), state.colors.end(), [&](const ColorTarget& target) { return target.exportIndex == location; });
+        // Vulkan attachment writes preserve integer lanes only when the shader's output type
+        // agrees with the attachment numeric class. Export locations may map to compacted MRTs.
+        const bool unsignedAttachment = color != state.colors.end() &&
+            (color->format == VK_FORMAT_R8_UINT || color->format == VK_FORMAT_R16_UINT ||
+             color->format == VK_FORMAT_R32_UINT || color->format == VK_FORMAT_R16G16_UINT ||
+             color->format == VK_FORMAT_R32G32_UINT || color->format == VK_FORMAT_R16G16B16A16_UINT ||
+             color->format == VK_FORMAT_R32G32B32A32_UINT);
+        Require(signature == (unsignedAttachment ? "vertex:u32x4" : "vertex:f32x4"), "fragment color output type disagrees with its attachment numeric class");
         locations.insert(location);
     }
     return locations;

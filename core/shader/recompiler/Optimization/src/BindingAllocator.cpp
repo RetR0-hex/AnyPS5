@@ -97,7 +97,7 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
     next.memoryOffsetDword = static_cast<std::uint32_t>(next.userDataRegisters.size());
     next.memoryOffsetCount = static_cast<std::uint32_t>(info.buffers.size());
     next.dispatchThreadLimit = info.dispatchThreadLimit;
-    if (info.buffers.size() > RuntimeAbi::BufferCapacity || info.images.size() > RuntimeAbi::ImageCapacity || info.samplers.size() > RuntimeAbi::SamplerHeapCapacity) fail("shader binding layout exceeds runtime metadata capacity");
+    if (info.buffers.size() > RuntimeAbi::BufferCapacity || info.images.size() > RuntimeAbi::ImageCapacity || info.samplers.size() > RuntimeAbi::SamplerCapacity) fail("shader binding layout exceeds runtime metadata capacity");
     if (std::ranges::any_of(next.userDataRegisters, [](auto reg) { return reg >= RuntimeAbi::UserDataCapacity; })) fail("shader user data exceeds runtime ABI capacity");
     if (std::ranges::any_of(info.images, [](const auto& image) { return image.indirectRoot != ImageResource::NoIndirectImage; })) next.runtimeImageCount = static_cast<std::uint32_t>(info.images.size());
     const auto pushSize = layout.pushConstantSizeBytes / 4u;
@@ -114,7 +114,8 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
     std::array<std::vector<std::uint32_t>, ImageBindingCount> imageGroups;
     const auto place = [&](std::uint32_t i) {
         const bool dynamic = info.images[i].mipMode == ImageMipMode::DynamicStorage;
-        const std::uint32_t count = dynamic ? RuntimeAbi::StorageHeapCapacity : 1u;
+        // Each dynamic image owns a consecutive mip range within the shared typed heap.
+        const std::uint32_t count = dynamic ? RuntimeAbi::StorageMipCapacity : 1u;
         std::array<bool, ImageBindingCount> placed{};
         for (const auto& mode : ResourceMaterializer::RuntimeImageModes(info.images[i])) {
             const auto group = ImageBindingIndex(DescriptorBindingForImage(mode));
@@ -143,7 +144,10 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
     }
     for (std::uint32_t i = 0; i < imageGroups.size(); i++) {
         if (!imageGroups[i].empty()) {
-            if (imageGroups[i].size() > RuntimeAbi::HeapCapacity(static_cast<DescriptorBindingKind>(FirstImageBinding + i))) fail("shader image heap capacity exceeded");
+            // Report the typed heap, since sampled images and storage mip arrays have
+            // different limits and need different allocation strategies.
+            const auto capacity = RuntimeAbi::HeapCapacity(static_cast<DescriptorBindingKind>(FirstImageBinding + i));
+            if (imageGroups[i].size() > capacity) fail("shader image heap capacity exceeded: binding=" + std::to_string(FirstImageBinding + i) + " required=" + std::to_string(imageGroups[i].size()) + " capacity=" + std::to_string(capacity));
             addBinding(next, static_cast<DescriptorBindingKind>(FirstImageBinding + i), std::move(imageGroups[i]));
         }
     }

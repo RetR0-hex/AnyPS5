@@ -36,8 +36,10 @@ def collect_runtime_artifacts(source, destination, previous):
 
 def trace_flags(root):
     names = {'APS5_PROFILE_DRAW', 'APS5_PROFILE_GPU'}
-    for path in (root / 'core' / 'libs').rglob('*.cpp'):
-        names.update(re.findall(r'"(APS5_TRACE_[A-Z0-9_]+)"', path.read_text(encoding='utf-8')))
+    # Shader front-end stalls happen before runtime IR dumps; include its trace switches too.
+    for source in (root / 'core' / 'libs', root / 'core' / 'shader'):
+        for path in source.rglob('*.cpp'):
+            names.update(re.findall(r'"(APS5_TRACE_[A-Z0-9_]+)"', path.read_text(encoding='utf-8')))
     return sorted(names)
 
 

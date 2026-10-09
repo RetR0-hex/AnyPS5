@@ -173,6 +173,9 @@ struct ShaderPixelInputInfo {
     bool psExecuteOnNoop = false;
     ConservativeZExport psConservativeZExport = ConservativeZExport::AnyZ;
     bool psOrderedPixelShader = false;
+    // MRT0 and MRT1 are the two sources of a dual-source blend into color target 0; both are
+    // emitted at location 0 (Index 0 and 1) and no further MRT may be exported.
+    bool psDualSourceBlend = false;
     ShaderStageRuntime stage;
 
     bool HasPositionInput() const {

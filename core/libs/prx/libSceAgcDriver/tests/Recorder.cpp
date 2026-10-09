@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -17,6 +18,7 @@
 #include "ResidentPresent.hpp"
 #include "SampleLod_spv.h"
 #include "SampleArray_spv.h"
+#include "DepthStorage_spv.h"
 #include <SDL_loadso.h>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -1688,6 +1690,219 @@ void storageRefreshTests(const Device& device, Recorder& recorder, bool watched)
     recorder.Sync();
 }
 
+void depthAllocationReuseTests(const Device& device, Recorder& recorder) {
+    const auto& context = device.GetContext();
+    DepthTarget depth{};
+    depth.address = 0x700000000ull;
+    depth.extent = {32, 32};
+    depth.format = VK_FORMAT_D32_SFLOAT;
+    depth.clearDepth = 1.0f;
+    Require(DepthSurfaceView(context, depth) != VK_NULL_HANDLE, "cannot create the depth reuse fixture");
+    GuestTextureResource resource{};
+    resource.baseAddress = depth.address;
+    resource.width = resource.height = 32;
+    resource.tileMode = TextureTileMode::kZ64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 22;
+    Require(DepthSurfaceAt(context, resource), "the genuine depth layout was not identified");
+    Require(DepthSurfaceTexture(context, {}, resource, {}) != nullptr, "a genuine depth descriptor lost its sampled image");
+    // A color UAV can reuse the allocation while queued work still keeps the old depth image live.
+    // Preserve its lifetime, but classify the new descriptor by layout and device rather than address.
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.width = resource.height = 64;
+    Require(!DepthSurfaceAt(context, resource), "a reused color allocation was classified as depth");
+    Require(DepthSurfaceTexture(context, {}, resource, {}) == nullptr, "a reused color allocation sampled an obsolete depth image");
+    Require(DepthSurfaceStorage(context, resource, 0) == nullptr, "a reused color allocation loaded an obsolete depth storage proxy");
+    resource.tileMode = TextureTileMode::kZ64KBX;
+    auto other = context;
+    other.device = VK_NULL_HANDLE;
+    Require(!DepthSurfaceAt(other, resource), "a depth cache entry leaked across devices");
+    recorder.Sync();
+    ClearDepthSurfaces(context.device);
+}
+
+std::uint32_t writeDepthBits(const Context& context, Recorder& recorder, VkImageView view, std::uint32_t replacement) {
+    Buffer result(context, sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    struct Objects {
+        const Context& context;
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkShaderModule module = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        ~Objects() {
+            if (pool) context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")(context.device, pool, nullptr);
+            if (pipeline) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, pipeline, nullptr);
+            if (module) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
+            if (layout) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, layout, nullptr);
+            if (setLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, setLayout, nullptr);
+        }
+    } objects{context};
+    const VkDescriptorSetLayoutBinding bindings[]{{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+    VkDescriptorSetLayoutCreateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    setInfo.bindingCount = 2;
+    setInfo.pBindings = bindings;
+    Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &setInfo, nullptr, &objects.setLayout), "create UINT depth set layout");
+    const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(replacement)};
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &objects.setLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &push;
+    Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &objects.layout), "create UINT depth pipeline layout");
+    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    moduleInfo.codeSize = sizeof(DEPTH_STORAGE_SPV);
+    moduleInfo.pCode = DEPTH_STORAGE_SPV;
+    Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &objects.module), "create UINT depth shader");
+    VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, objects.module, "main", nullptr};
+    pipelineInfo.layout = objects.layout;
+    Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &objects.pipeline), "create UINT depth pipeline");
+    const VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = sizes;
+    Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &objects.pool), "create UINT depth descriptor pool");
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = objects.pool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &objects.setLayout;
+    VkDescriptorSet set;
+    Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocate, &set), "allocate UINT depth descriptors");
+    const VkDescriptorImageInfo image{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorBufferInfo output{result.Handle(), 0, sizeof(std::uint32_t)};
+    VkWriteDescriptorSet writes[2]{{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    for (auto& write : writes) { write.dstSet = set; write.descriptorCount = 1; }
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[0].pImageInfo = &image;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[1].pBufferInfo = &output;
+    context.Function<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(context.device, 2, writes, 0, nullptr);
+    const auto commands = recorder.Commands();
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, objects.pipeline);
+    context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, objects.layout, 0, 1, &set, 0, nullptr);
+    context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, objects.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(replacement), &replacement);
+    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, 1, 1, 1);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    recorder.Sync();
+    result.Invalidate();
+    std::uint32_t before;
+    std::memcpy(&before, result.Bytes().data(), sizeof(before));
+    return before;
+}
+
+void depthStorageTests(const Device& device, Recorder& recorder) {
+    constexpr std::size_t bytes = 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(bytes, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the depth storage fixture");
+    std::memset(block, 0, bytes);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true);
+    }
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    struct Release {
+        void* block;
+        ~Release() {
+            { GuestAllocations::Mutation mutation; mutation.Remove(block); }
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{block};
+    TextureDetiler detiler(device.GetContext());
+    auto context = device.GetContext();
+    context.detiler = &detiler;
+    for (const auto nativeFormat : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        DepthTarget depth{};
+        depth.address = address;
+        depth.extent = {32, 32};
+        depth.format = nativeFormat;
+        depth.stencilAddress = nativeFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ? address + bytes / 2 : 0;
+        depth.clearDepth = 0.625f;
+        depth.clearStencil = 17;
+        DepthSurfaceView(context, depth);
+        GuestTextureResource resource{};
+        resource.baseAddress = address;
+        resource.width = resource.height = 32;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kZ64KBX;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = 22;
+        auto proxy = DepthSurfaceStorage(context, resource, 0);
+        Require(proxy != nullptr && IsDepthSurfaceStorage(context, proxy.get()), "depth storage did not create an identifiable proxy");
+        const auto holds = [&](float expected) {
+            Buffer readback(context, 32 * 32 * sizeof(float), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            const auto commands = recorder.Commands();
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {32, 32, 1};
+            context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, proxy->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+            recorder.Sync();
+            readback.Invalidate();
+            for (std::size_t offset = 0; offset < readback.Bytes().size(); offset += sizeof(float)) {
+                float value;
+                std::memcpy(&value, readback.Bytes().data() + offset, sizeof(value));
+                Require(value == expected, "depth storage transfer did not preserve the native depth values");
+            }
+        };
+        const auto clearProxy = [&](float value) {
+            const auto commands = recorder.Commands();
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkClearColorValue clear{};
+            clear.float32[0] = value;
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, proxy->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+        };
+        // Guest memory starts as zero, so this proves the first proxy load comes from real GPU
+        // depth. Poisoning the proxy after store then proves a reload reads the modified native
+        // image, rather than accidentally retaining the compute output in the color image.
+        holds(0.625f);
+        clearProxy(0.25f);
+        StoreDepthSurfaceStorage(context, proxy.get());
+        clearProxy(0.875f);
+        Require(DepthSurfaceStorage(context, resource, 0) == proxy, "depth storage discarded its reusable GPU proxy");
+        holds(0.25f);
+        auto integer = resource;
+        // Guest data format 20 is 32-bit UINT (R32_UINT in TextureFormat.cpp); the shader IR header
+        // that names it is not on this test target's include path.
+        integer.format = 20u;
+        const auto integerProxy = DepthSurfaceStorage(context, integer, 0);
+        Require(integerProxy == proxy, "integer depth access created a competing storage image");
+        // UINT shader instructions must observe and replace raw float bits, then a float lookup
+        // must see those exact replacement bits after the native-depth store and reload. The proxy
+        // is a one-layer 2D array, so the shader's uimage2D binds its first-layer view.
+        Require(writeDepthBits(context, recorder, integerProxy->AtomicView(0, true), 0x3ec00000u) == 0x3e800000u, "UINT depth load converted the depth value instead of reading its bits");
+        StoreDepthSurfaceStorage(context, integerProxy.get());
+        clearProxy(0.875f);
+        Require(DepthSurfaceStorage(context, resource, 0) == proxy, "float depth access lost the canonical proxy after a UINT write");
+        holds(0.375f);
+        auto unsupported = resource;
+        unsupported.format = 13;
+        bool rejected = false;
+        try { DepthSurfaceStorage(context, unsupported, 0); } catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected, "narrow depth storage was silently accepted as a 32-bit plane");
+        proxy->Flush();
+        recorder.Sync();
+        ClearDepthSurfaces(context.device);
+        proxy.reset();
+    }
+    ClearHostImports(context.device);
+    std::cout << "GPU depth storage initialization and writable round trips passed\n";
+}
+
 void importWatchTests(const Device& device) {
     using namespace AgcDriver::GuestMemory;
     const auto& context = device.GetContext();
@@ -2951,6 +3166,8 @@ int main(int argc, char** argv) {
         writeBackPaddingTests(device, recorder, false);
         writeBackPaddingTests(device, recorder, true);
         importWatchTests(device);
+        depthAllocationReuseTests(device, recorder);
+        depthStorageTests(device, recorder);
         staleGenerationTests(device, recorder);
         importWindowTests(device, recorder);
         dataWordPositionsTests();

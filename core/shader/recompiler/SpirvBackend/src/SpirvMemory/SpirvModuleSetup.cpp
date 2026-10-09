@@ -96,12 +96,26 @@ void DefineModule(SpirvEmitterState& state) {
         state.module.EmitExtension("SPV_EXT_shader_image_int64");
     }
     if (state.clipDistanceVariable != 0) {
+        // Never turn guest clip planes into a Vulkan shader on a device without this feature.
+        if (std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityClipDistance)) == state.supportedCapabilities.end()) {
+            FailEmit("clip-distance exports need shaderClipDistance");
+        }
         state.module.EmitCapability(spv::CapabilityClipDistance);
     }
     if (state.cullDistanceVariable != 0) {
         state.module.EmitCapability(spv::CapabilityCullDistance);
     }
-    if (state.layerVariable != 0) {
+    if (state.layerVariable != 0 && StageOf(state) != IrShaderStage::Mesh) {
+        // A vertex-stage render target index (PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX)
+        // selects the attachment layer. The driver targets Vulkan 1.1, whose SPIR-V ceiling is
+        // 1.4, so SPIR-V 1.5's ShaderLayer is unusable; VK_EXT_shader_viewport_index_layer
+        // provides the same output on SPIR-V 1.0+. Never emit it for a device without that.
+        if (std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityShaderViewportIndexLayerEXT)) == state.supportedCapabilities.end()) {
+            FailEmit("vertex layer exports need VK_EXT_shader_viewport_index_layer");
+        }
+        state.module.EmitCapability(spv::CapabilityShaderViewportIndexLayerEXT);
+        state.module.EmitExtension("SPV_EXT_shader_viewport_index_layer");
+    } else if (state.layerVariable != 0) {
         state.module.RequireVersion(0x00010500u);
         state.module.EmitCapability(spv::CapabilityShaderLayer);
     }

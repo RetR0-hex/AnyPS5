@@ -111,6 +111,15 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     swappcInfo.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
     auto cfg = graphBuilder.Build(decoded, &swappcInfo);
 
+    // Capture the input before structurization: a rewrite that stalls never reaches the IR dump.
+    const char* dumpCfg = std::getenv("APS5_DUMP_CFG");
+    if (dumpCfg != nullptr) {
+        char address[32];
+        std::snprintf(address, sizeof(address), "%llx", static_cast<unsigned long long>(request.shader.codeAddress));
+        if (std::string_view(dumpCfg) == "all" || std::string_view(dumpCfg).find(address) != std::string_view::npos)
+            std::fprintf(stderr, "[cfg] shader 0x%s before structurization\n%s\n", address, GraphToString(cfg).c_str());
+    }
+
     constexpr Structurizer structurizer;
     structurizer.Structurize(cfg);
 
@@ -830,6 +839,8 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     }
     if (request.context.vertex) {
         const auto& vertex = *request.context.vertex;
+        // Identical code and buffers can export different clipping planes under different state.
+        mix(vertex.paClVsOutCntl);
         const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
         mix(count);
         for (std::uint32_t i = 0; i < count; ++i) {

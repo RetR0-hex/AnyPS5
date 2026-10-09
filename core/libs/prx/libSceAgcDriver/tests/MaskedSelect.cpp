@@ -164,7 +164,7 @@ int main() {
 
     passed &= run("cross-lane reads must keep the select", [] {
         bool ok = true;
-        for (const IrOpcode opcode : {IrOpcode::ReadFirstLane, IrOpcode::DppMoveU32, IrOpcode::BpermuteU32, IrOpcode::Permlane16U32, IrOpcode::SwizzleU32}) {
+        for (const IrOpcode opcode : {IrOpcode::DppMoveU32, IrOpcode::BpermuteU32, IrOpcode::Permlane16U32, IrOpcode::SwizzleU32}) {
             Builder b;
             auto& exec = b.mask(16u);
             auto& old = b.lane();
@@ -180,6 +180,80 @@ int main() {
         auto& ballot = b.emit(IrOpcode::Ballot, IrType::U32x4, {&b.emit(IrOpcode::INotEqual32, IrType::Bool, {&written, &b.constant(0u)})});
         b.keep(b.emit(IrOpcode::CompositeExtractU32x4, IrType::U32, {&ballot, &b.constant(0u)}));
         return ok && b.eliminate() == 0u && !removed(written);
+    });
+
+    // First-lane reads elect a source from their EXEC mask. They may discard old
+    // lanes only when that mask cannot elect a lane outside the original write.
+    passed &= run("first-lane reads preserve inactive lanes under a wider exec", [] {
+        Builder b;
+        auto& exec = b.mask(16u);
+        auto& old = b.lane();
+        auto& written = b.select(exec, b.add(old, 1u), old);
+        auto& read = b.emit(IrOpcode::ReadFirstLane, IrType::U32, {&written, &b.mask(32u)});
+        b.keep(read);
+        return b.eliminate() == 0u && !removed(written);
+    });
+
+    passed &= run("first-lane reads follow an invariant mask through a loop phi", [] {
+        bool passed = true;
+        for (bool widen : {false, true}) {
+            Builder b;
+            b.program.Resources().stage = IrShaderStage::Pixel;
+            auto& exec = b.mask(16u);
+            auto& old = b.emit(IrOpcode::GetBuiltin, IrType::U32, {&b.constant(static_cast<std::uint32_t>(StageInputKind::PackedAncillary)), &b.constant(0u)});
+            auto& written = b.select(exec, b.add(old, 1u), old);
+            auto& head = *b.block;
+            auto& loop = b.newBlock();
+            head.AddBranch(&loop);
+            loop.AddBranch(&loop);
+            b.block = &loop;
+            auto& mask = b.emit(IrOpcode::Phi, IrType::Bool, {});
+            mask.AddPhiOperand(&head, &exec);
+            auto& backedge = widen ? b.mask(32u) : b.ballotBit(b.logicalAnd(mask, b.mask(8u)));
+            mask.AddPhiOperand(&loop, &backedge);
+            auto& read = b.emit(IrOpcode::ReadFirstLane, IrType::U32, {&written, &mask});
+            b.keep(read);
+            passed &= b.eliminate() == (widen ? 0u : 1u) && removed(written) != widen;
+        }
+        return passed;
+    });
+
+    // A failure in one entry must propagate around mutually recursive phis;
+    // assuming a backedge alone is guarded must not conceal that wider entry.
+    passed &= run("mutually recursive loop masks check every entry", [] {
+        bool passed = true;
+        for (bool widen : {false, true}) {
+            Builder b;
+            auto& exec = b.mask(16u);
+            auto& old = b.lane();
+            auto& written = b.select(exec, b.add(old, 1u), old);
+            auto& head = *b.block;
+            auto& loop = b.newBlock();
+            head.AddBranch(&loop);
+            loop.AddBranch(&loop);
+            b.block = &loop;
+            auto& first = b.emit(IrOpcode::Phi, IrType::Bool, {});
+            auto& second = b.emit(IrOpcode::Phi, IrType::Bool, {});
+            first.AddPhiOperand(&head, &exec);
+            first.AddPhiOperand(&loop, &second);
+            second.AddPhiOperand(&head, widen ? &b.mask(32u) : &exec);
+            second.AddPhiOperand(&loop, &b.ballotBit(first));
+            b.keep(b.emit(IrOpcode::ReadFirstLane, IrType::U32, {&written, &first}));
+            passed &= b.eliminate() == (widen ? 0u : 1u) && removed(written) != widen;
+        }
+        return passed;
+    });
+
+    passed &= run("packed ancillary preservation follows a large guarded ALU chain", [] {
+        Builder b;
+        b.program.Resources().stage = IrShaderStage::Pixel;
+        auto& exec = b.mask(16u);
+        auto& old = b.emit(IrOpcode::GetBuiltin, IrType::U32, {&b.constant(static_cast<std::uint32_t>(StageInputKind::PackedAncillary)), &b.constant(0u)});
+        auto& written = b.select(exec, b.lane(), old);
+        auto* chain = &written;
+        for (std::uint32_t i = 0; i < 5000; ++i) chain = &b.add(*chain, 1u);
+        b.keep(b.select(exec, *chain, b.constant(0u)));
+        return b.eliminate() == 1u && removed(written);
     });
 
     passed &= run("a branch condition derived from the write keeps the select", [] {
@@ -292,7 +366,9 @@ int main() {
         return b.eliminate() == 0u && !removed(written);
     });
 
-    passed &= run("a write read inside a later loop must keep its select", [] {
+    // An entry-block mask is invariant across iterations, so a guarded read in a loop
+    // cannot observe the inactive arm of a write made before that loop.
+    passed &= run("a write guarded by an invariant mask inside a later loop loses its select", [] {
         Builder b;
         auto& exec = b.mask(16u);
         auto& old = b.lane();
@@ -303,7 +379,7 @@ int main() {
         loop.AddBranch(&loop);
         b.block = &loop;
         b.keep(b.select(exec, b.add(written, 2u), old));
-        return b.eliminate() == 0u && !removed(written);
+        return b.eliminate() == 1u && removed(written);
     });
 
     const auto sample = [](IrShaderStage stage, std::uint32_t sampleFlags) {

@@ -6,6 +6,7 @@
 #include <limits>
 #include <set>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -121,13 +122,17 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
     return result;
 }
 
-// The whole byte range a vertex buffer descriptor covers (records * stride, or records when the
-// stride is 0): what an indirect draw, whose counts only the GPU knows, copies for the fetch.
+// An indirect draw normally copies the descriptor extent because only the GPU knows its count.
+// OOB_SELECT=2 disables bounds except for an empty descriptor: a zero-stride attribute always
+// fetches the same complete format value, even when NUM_RECORDS is smaller than that value.
 inline std::size_t VertexBufferExtent(const ShaderRecompiler::VertexAttribute& attribute) {
     const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
     const auto records = attribute.resource.fields[2];
+    const bool unbounded = ((attribute.resource.fields[3] >> 28u) & 3u) == 2u;
     Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
-    const auto bytes = stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
+    Require(!unbounded || records != 0, "empty vertex buffer descriptor");
+    const auto bytes = stride == 0 && unbounded ? static_cast<std::uint64_t>(DecodeVertexFormat(attribute).bytes) :
+                       stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "empty or oversized vertex buffer descriptor");
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
@@ -139,13 +144,25 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     Require(firstInstance <= std::numeric_limits<std::uint32_t>::max() - (instances - 1u), "vertex input instance range overflow");
     const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
     const auto records = attribute.resource.fields[2];
+    const bool unbounded = ((attribute.resource.fields[3] >> 28u) & 3u) == 2u;
     Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
     const auto index = attribute.fetchIndex == 0 ? maxIndex : firstInstance + instances - 1u;
     const auto bytes = DecodeVertexFormat(attribute).bytes;
-    Require(stride == 0 || index < records, "vertex fetch exceeds descriptor record count");
+    // RDNA OOB_SELECT=2 checks only NUM_RECORDS==0, not index or payload extent. Guest
+    // mapping checks still protect the host copy; NUM_RECORDS is not its size limit in this mode.
+    Require(!unbounded || records != 0, "empty vertex buffer descriptor");
+    Require(unbounded || stride == 0 || index < records, "vertex fetch exceeds descriptor record count");
     const auto available = stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
     const auto required = static_cast<std::uint64_t>(stride) * index + bytes;
-    Require(required <= available && required <= std::numeric_limits<std::size_t>::max(), "vertex fetch exceeds descriptor byte range");
+    // Include descriptor bounds so an invalid index can be distinguished from a
+    // zero-stride constant attribute whose byte-count interpretation differs.
+    Require((unbounded || required <= available) && required <= std::numeric_limits<std::size_t>::max(),
+            "vertex fetch exceeds descriptor byte range (stride=" + std::to_string(stride) +
+            ", records=" + std::to_string(records) + ", index=" + std::to_string(index) +
+            ", elementBytes=" + std::to_string(bytes) + ", required=" + std::to_string(required) +
+            ", available=" + std::to_string(available) + ", descriptorFlags=" +
+            std::to_string(attribute.resource.fields[3]) + ", oobSelect=" +
+            std::to_string((attribute.resource.fields[3] >> 28u) & 3u) + ")");
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
     return static_cast<std::size_t>(required);

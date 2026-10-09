@@ -676,11 +676,9 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
-    if (DepthSurfaceAt(viewed.baseAddress)) {
-        char text[112];
-        std::snprintf(text, sizeof(text), "AGC graphics: storage image access to depth/stencil surface 0x%llx is not implemented", static_cast<unsigned long long>(viewed.baseAddress));
-        throw std::runtime_error(text);
-    }
+    // Depth attachment contents live on the GPU, so guest upload cannot supply a depth UAV.
+    // Its R32 proxy is refreshed by depth-plane transfer before the normal color cache is used.
+    if (auto depth = DepthSurfaceStorage(context, viewed, mip, words)) return depth;
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     if (disabled) return std::make_shared<StorageTexture>(context, *context.detiler, viewed, mip);
     static_cast<void>(words);
@@ -1121,7 +1119,9 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             const auto firstDeferred = deferredImages.size();
             for (const auto& binding : shader.program->bindings) {
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
-                Require(occupied.insert(binding.binding).second, "duplicate shader binding");
+                // Name the colliding binding: each stage owns its own RuntimeAbi binding group, so a
+                // repeat means two stages (or one stage twice) claimed the same group.
+                if (!occupied.insert(binding.binding).second) throw std::runtime_error("AGC graphics: duplicate shader binding " + std::to_string(binding.binding) + " (role " + std::to_string(static_cast<std::uint32_t>(binding.role)) + ", stage " + std::to_string(static_cast<std::uint32_t>(shader.stage)) + " of " + std::to_string(shaders.size()) + " shaders)");
                 const bool addressRole = binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer;
                 const bool bufferRole = addressRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding.role == ShaderRecompiler::DescriptorRole::Gds;
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
@@ -1388,6 +1388,9 @@ void ShaderResources::noteReusable() {
     reusable = false;
     directRegions.clear();
     if (NeedsCompletion() || HoldsLease()) return;
+    // Native depth draws do not change guest write stamps. Reusing this descriptor object would
+    // bypass the proxy's depth-to-color copy and expose the previous dispatch's depth contents.
+    if (std::any_of(storageTextures.begin(), storageTextures.end(), [&](const auto& image) { return IsDepthSurfaceStorage(context, image.get()); })) return;
     if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.size > MaxRefreshBytes; })) return;
     const auto regions = guestMemory.DirectRegions();
     if (!regions.has_value()) return;
@@ -2906,7 +2909,7 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             continue;
         }
         const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
-        const bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
+        bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
         if (binding.imageShape.has_value() && !firstLayer && !MatchesGuestDimension(*binding.imageShape, resource.dimension)) throw std::runtime_error("AGC graphics: guest storage texture dimension disagrees with the shader's declared image shape (shape " + std::to_string(static_cast<int>(*binding.imageShape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
         const auto mip = std::min(resource.baseLevel + mipOffset, resource.mipCount - 1u);
         Require(resource.minLod <= mip * 256u, "guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
@@ -2914,12 +2917,19 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
         // The same surface as the previous element: its image was just looked up and refreshed.
         if (sameAsPrevious && StorageDedupeEnabled()) storageTextures.push_back(storageTextures.back());
         else storageTextures.push_back(cachedStorageTexture(context, words, resource, mip, guestBytes));
+        // A depth proxy is always a one-layer 2D array (see DepthSurface::Storage), so a plain 2D
+        // descriptor or an image2D shader must bind its first-layer 2D view instead.
+        const bool depthProxy = IsDepthSurfaceStorage(context, storageTextures.back().get());
+        if (depthProxy && (binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D || (!binding.imageShape.has_value() && resource.dimension == TextureDimension::k2D))) firstLayer = true;
         storageMips.push_back(mip);
         storageKeys.push_back(resource.dccAddress);
         storageFirstLayer.push_back(firstLayer);
         // Images the shader only reads have nothing to store back.
         storageWritten.push_back(element >= binding.imageWritten.size() || binding.imageWritten[element]);
-        storageAtomic.push_back(element < binding.imageAtomic.size() && binding.imageAtomic[element]);
+        // The depth proxy has one canonical float allocation. A depth-bit UINT descriptor must
+        // use its compatible R32UINT view even for plain image_load/image_store, without atomics.
+        const bool depthUint = resource.tileMode == TextureTileMode::kZ64KBX && ResolveTextureFormat(resource.format) == VK_FORMAT_R32_UINT && depthProxy;
+        storageAtomic.push_back((element < binding.imageAtomic.size() && binding.imageAtomic[element]) || depthUint);
         storageAtomic64.push_back(element < binding.imageAtomic64.size() && binding.imageAtomic64[element]);
         describedRanges.push_back({"storage", resource.baseAddress, guestBytes, resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), resource.dccAddress});
         item.imageAllocations.push_back(storageTextures.size() - 1);
@@ -3149,7 +3159,10 @@ void ShaderResources::WriteBack() {
     WriteBackBuffers();
     if (SkipWriteBack()) return;
     for (std::size_t index = 0; index < storageTextures.size(); ++index) {
-        if (storageWritten[index]) storageTextures[index]->MarkDirty();
+        if (storageWritten[index]) {
+            StoreDepthSurfaceStorage(context, storageTextures[index].get());
+            storageTextures[index]->MarkDirty();
+        }
     }
 }
 
@@ -3160,7 +3173,10 @@ void ShaderResources::MarkGpuWrites(Recorder& recorder) {
     recorder.NotePendingReads(guestMemory.InPlaceReads(), guestMemory.HoldsLease() ? Recorder::ReadKind::AddressBased : Recorder::ReadKind::DispatchElement);
     if (SkipWriteBack()) return;
     for (std::size_t index = 0; index < storageTextures.size(); ++index) {
-        if (storageWritten[index]) storageTextures[index]->MarkDirty();
+        if (storageWritten[index]) {
+            StoreDepthSurfaceStorage(context, storageTextures[index].get());
+            storageTextures[index]->MarkDirty();
+        }
     }
     // Written sub-ranges of buffers the GPU copied out of a host import go back into it by the GPU,
     // recorded here after the work: those regions then need no CPU write-back (HasCopiedWrites),

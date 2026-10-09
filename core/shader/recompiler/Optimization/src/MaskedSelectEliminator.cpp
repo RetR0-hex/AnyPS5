@@ -2,6 +2,8 @@
 #include "Optimization/DeadCodeEliminator.hpp"
 #include "RdnaDecoder/RdnaInstruction.hpp"
 #include <optional>
+#include <map>
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -337,8 +339,133 @@ std::unordered_set<const IrBlock*> blocksOutsideLoops(const IrProgram& program) 
     return result;
 }
 
+struct InvariantImplication {
+    static constexpr std::size_t ProofVisitLimit = 65536;
+    const IrValue* mask;
+    std::uint32_t waveSize;
+
+    // Loop masks form monotone AND/OR equations. Start with the induction
+    // hypothesis that each mask is contained in the guard, then propagate every
+    // failing entry through its dependents. This proves mutually recursive phis
+    // without enumerating exponentially many sets of active loop assumptions.
+    struct Node {
+        const IrValue* value;
+        bool word;
+        bool all = true;
+        bool valid = true;
+        std::vector<std::size_t> inputs;
+        std::vector<std::size_t> users;
+    };
+    std::map<std::pair<const IrValue*, bool>, std::size_t> indices;
+    std::vector<Node> nodes;
+    bool exceeded = false;
+
+    std::size_t get(const IrValue* value, bool word) {
+        const auto key = std::make_pair(value->Resolve(), word);
+        if (const auto found = indices.find(key); found != indices.end()) return found->second;
+        const auto index = nodes.size();
+        indices.emplace(key, index);
+        nodes.push_back({key.first, word});
+        if (nodes.size() > ProofVisitLimit) exceeded = true;
+        return index;
+    }
+
+    void input(std::size_t index, const IrValue* value, bool word) {
+        const auto child = get(value, word);
+        // get() may grow nodes and invalidate references to its elements.
+        nodes[index].inputs.push_back(child);
+        nodes[child].users.push_back(index);
+    }
+
+    void expand(std::size_t index) {
+        const auto* value = nodes[index].value;
+        const bool word = nodes[index].word;
+        if ((word && isImmediate(value, 0u)) || (!word && implies(value, mask, waveSize))) return;
+        if (value->IsPhi()) {
+            nodes[index].valid = value->ArgumentCount() != 0;
+            for (std::size_t i = 0; i < value->ArgumentCount(); ++i) input(index, value->Argument(i), word);
+            return;
+        }
+        const auto op = value->Opcode();
+        if ((word && (op == IrOpcode::BitwiseAnd32 || op == IrOpcode::BitwiseOr32 || op == IrOpcode::BitwiseXor32)) ||
+            (!word && (op == IrOpcode::LogicalAnd || op == IrOpcode::LogicalOr))) {
+            nodes[index].all = word ? op != IrOpcode::BitwiseAnd32 : op != IrOpcode::LogicalAnd;
+            input(index, value->Argument(0), word);
+            input(index, value->Argument(1), word);
+            return;
+        }
+        if ((word && op == IrOpcode::SelectU32) || (!word && op == IrOpcode::SelectU1)) {
+            input(index, value->Argument(1), word);
+            input(index, value->Argument(2), word);
+            return;
+        }
+        if (word && op == IrOpcode::CompositeExtractU32x4) {
+            const auto* ballot = value->Argument(0)->Resolve();
+            const auto* component = value->Argument(1)->Resolve();
+            if (ballot->Opcode() == IrOpcode::Ballot && (isImmediate(component, 0u) || isImmediate(component, 1u))) {
+                input(index, ballot->Argument(0), false);
+                return;
+            }
+        }
+        if (!word) {
+            if (const auto bit = threadBit(value, waveSize)) {
+                input(index, bit->low, true);
+                if (waveSize != 32u) input(index, bit->high, true);
+                return;
+            }
+        }
+        nodes[index].valid = false;
+    }
+
+    bool predicate(const IrValue* value) {
+        if (exceeded) return false;
+        const auto first = nodes.size();
+        const auto root = get(value, false);
+        for (auto i = first; i < nodes.size() && !exceeded; ++i) expand(i);
+        if (exceeded) return false;
+        std::vector<std::size_t> pending;
+        const auto fails = [&](const Node& node) {
+            if (node.inputs.empty()) return !node.valid;
+            if (node.all) return std::any_of(node.inputs.begin(), node.inputs.end(), [&](auto i) { return !nodes[i].valid; });
+            return std::none_of(node.inputs.begin(), node.inputs.end(), [&](auto i) { return nodes[i].valid; });
+        };
+        for (auto i = first; i < nodes.size(); ++i) {
+            if (fails(nodes[i])) {
+                nodes[i].valid = false;
+                pending.push_back(i);
+            }
+        }
+        while (!pending.empty()) {
+            const auto failed = pending.back();
+            pending.pop_back();
+            for (const auto user : nodes[failed].users) {
+                if (nodes[user].valid && fails(nodes[user])) {
+                    nodes[user].valid = false;
+                    pending.push_back(user);
+                }
+            }
+        }
+        // Cached proofs belong to this select only; rewriting the IR invalidates
+        // the equation graph, so it must never be shared across removed selects.
+        return nodes[root].valid;
+    }
+};
+
 bool unobservedWhereMasked(const IrProgram& program, const std::unordered_set<const IrBlock*>& once, const IrValue& select, const IrValue* mask) {
     const auto waveSize = program.WaveSize();
+    const bool invariantMask = mask->Parent() != nullptr && once.contains(mask->Parent());
+    const auto* inactive = select.Argument(2)->Resolve();
+    // Packed inputs can have long consumer chains. Ordinary register selects also
+    // need induction proofs: eliminating them exposes the guards on packed inputs.
+    const bool packedInput = inactive->Opcode() == IrOpcode::GetBuiltin &&
+        isImmediate(inactive->Argument(0)->Resolve(), static_cast<std::uint32_t>(StageInputKind::PackedAncillary));
+    const auto consumerLimit = packedInput ? InvariantImplication::ProofVisitLimit : VisitLimit;
+    // All consumers of this select share a mask. Reuse their induction-context cache
+    // instead of rebuilding the same loop proof at every guarded sink.
+    auto proof = InvariantImplication{mask, waveSize};
+    const auto guarded = [&](const IrValue* condition) {
+        return implies(condition, mask, waveSize) || (invariantMask && proof.predicate(condition));
+    };
     std::vector<const IrValue*> pending{&select};
     std::unordered_set<const IrValue*> visited{&select};
     while (!pending.empty()) {
@@ -346,13 +473,16 @@ bool unobservedWhereMasked(const IrProgram& program, const std::unordered_set<co
         pending.pop_back();
         for (const IrUse& use : value->OperandUses()) {
             const IrValue* user = use.user;
-            if (user->Parent() == nullptr || !once.contains(user->Parent())) return false;
-            if (isSelect(user->Opcode()) && use.operand == 1u && implies(user->Argument(0), mask, waveSize)) continue;
-            if (user->Opcode() == IrOpcode::LogicalAnd && use.operand < 2u && implies(user->Argument(1u - use.operand), mask, waveSize)) continue;
-            if (readsOnlyWhereActive(user->Opcode()) && use.operand + 1u < user->ArgumentCount() && implies(user->Argument(user->ArgumentCount() - 1u), mask, waveSize)) continue;
+            if (user->Parent() == nullptr) return false;
+            // A guard computed once keeps the same value on every loop iteration. Pure
+            // lane-local chains may cross loops when all observable sinks honor that guard.
+            if (!once.contains(user->Parent()) && !invariantMask) return false;
+            if (isSelect(user->Opcode()) && use.operand == 1u && guarded(user->Argument(0))) continue;
+            if (user->Opcode() == IrOpcode::LogicalAnd && use.operand < 2u && guarded(user->Argument(1u - use.operand))) continue;
+            if ((readsOnlyWhereActive(user->Opcode()) || user->Opcode() == IrOpcode::ReadFirstLane) && use.operand + 1u < user->ArgumentCount() && guarded(user->Argument(user->ArgumentCount() - 1u))) continue;
             if (!user->IsPhi() && !isLaneLocal(user->Opcode()) && !isExplicitLodSample(program, *user)) return false;
             if (visited.insert(user).second) {
-                if (visited.size() > VisitLimit) return false;
+                if (visited.size() > consumerLimit) return false;
                 pending.push_back(user);
             }
         }

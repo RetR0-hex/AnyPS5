@@ -46,7 +46,20 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         } else {
             allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, properties);
         }
-        Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory buffer");
+        const auto allocated = context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory);
+        if (allocated != VK_SUCCESS) {
+            // Distinguish oversized buffers from pressure in the selected heap;
+            // host imports and cached transfer buffers also consume its budget.
+            std::string detail = "vkAllocateMemory buffer bytes=" + std::to_string(allocation.allocationSize) + " type=" + std::to_string(allocation.memoryTypeIndex);
+            if (context.memoryProperties2 != nullptr && context.physical != VK_NULL_HANDLE) {
+                VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+                VkPhysicalDeviceMemoryProperties2 reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &budget};
+                context.memoryProperties2(context.physical, &reported);
+                const auto heap = context.memory.memoryTypes[allocation.memoryTypeIndex].heapIndex;
+                detail += " heap=" + std::to_string(heap) + " usage=" + std::to_string(budget.heapUsage[heap]) + " budget=" + std::to_string(budget.heapBudget[heap]);
+            }
+            Check(allocated, detail.c_str());
+        }
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
         if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory, 0, VK_WHOLE_SIZE, 0, &mapping), "vkMapMemory");

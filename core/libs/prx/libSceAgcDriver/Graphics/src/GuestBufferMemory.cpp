@@ -346,11 +346,8 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0 || state.failed.contains(base)) return nullptr;
 #ifdef _WIN32
     decideImportWatch(context, state);
-    // Pinning Windows host memory can cause late driver writes to escape write-watch. Importing
-    // a watched allocation would therefore disable its stamps and force resident images to upload
-    // on every draw. Keep the copy path for these allocations; already untracked memory still
-    // benefits from imports and retains the conservative comparison policy.
-    if (state.unwatchImports && GuestMemory::Watched(base, static_cast<std::size_t>(bytes))) return nullptr;
+    // Decide whether pinning requires disabling write tracking, but defer rejection
+    // until we know whether this allocation has a separate shared alias.
 #endif
     // Pinned imports count against the driver's system memory budget; past it ordinary host
     // allocations fail, so imports stop at APS5_HOST_IMPORT_MIB (default 6 GiB, which covers the
@@ -406,6 +403,10 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         }
         entry.alias = GuestArena::GuestArenaMapAlias_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes));
     }
+    // Pinning private guest pages can disable their write stamps. A shared alias
+    // pins a separate view of the same backing instead, preserving protection on
+    // the guest view; rejecting it earlier forced every large GPU buffer to copy.
+    if (entry.alias == nullptr && state.unwatchImports && GuestMemory::Watched(base, static_cast<std::size_t>(bytes))) return nullptr;
 #else
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(base), static_cast<std::size_t>(bytes), true)) {
         state.failed.insert(base);
@@ -2029,7 +2030,10 @@ void GuestBufferMemory::UploadPrepare(bool addressable) {
         for (auto& region : regions) {
             if (region.mirror != nullptr) continue;
             // An import found when the lease was acquired is reused while none was dropped since.
-            const HostImport* entry = region.direct != nullptr && state.epoch == importsEpoch ? region.direct : nullptr;
+            // Merging descriptor regions can extend their bounds without changing
+            // the import epoch. A cached import must cover the enlarged range.
+            const HostImport* entry = region.direct != nullptr && state.epoch == importsEpoch &&
+                region.begin >= region.direct->base && region.end <= region.direct->base + region.direct->bytes ? region.direct : nullptr;
             region.direct = nullptr;
             if (stale) {
                 region.pending = true;
@@ -2173,7 +2177,10 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
             }
             // An import taken by UploadPrepare (or at the lease) is still the registry's unless one
             // was dropped since.
-            const HostImport* entry = region.direct != nullptr && state.epoch == importsEpoch ? region.direct : nullptr;
+            // Merging descriptor regions can extend their bounds without changing
+            // the import epoch. A cached import must cover the enlarged range.
+            const HostImport* entry = region.direct != nullptr && state.epoch == importsEpoch &&
+                region.begin >= region.direct->base && region.end <= region.direct->base + region.direct->bytes ? region.direct : nullptr;
             region.direct = nullptr;
             if (entry == nullptr) entry = findImport(state, region.begin, region.end);
             if (entry == nullptr) {
@@ -2496,7 +2503,14 @@ VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std:
     const auto* found = owner(address);
     Require(found != nullptr, "guest buffer has no GPU owner");
     const auto& region = *found;
-    Require(address >= region.begin && address + bytes <= region.end && (region.buffer != nullptr || region.direct != nullptr || region.mirror != nullptr), "guest buffer view exceeds its GPU owner");
+    // Include both logical and backing bounds: imported ranges can be larger
+    // than a descriptor region, while alignment may extend a view past either.
+    const auto rejectBounds = [&](const char* kind, std::uint64_t end) {
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "guest buffer view exceeds its GPU owner (%s): view=0x%llx+0x%zx region=0x%llx..0x%llx backingEnd=0x%llx import=%d mirror=%d buffer=%d", kind, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(region.end), static_cast<unsigned long long>(end), region.direct != nullptr, region.mirror != nullptr, region.buffer != nullptr);
+        throw std::runtime_error(std::string("AGC graphics: ") + detail);
+    };
+    if (!(address >= region.begin && address + bytes <= region.end && (region.buffer != nullptr || region.direct != nullptr || region.mirror != nullptr))) rejectBounds("logical", region.end);
     const auto base = region.direct != nullptr ? region.direct->base : region.mirror != nullptr ? region.mirror->base : region.begin;
     const auto offset = address - base;
     Require(context.limits.minStorageBufferOffsetAlignment != 0, "no storage buffer offset alignment");
@@ -2504,7 +2518,7 @@ VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std:
     adjustment = static_cast<std::uint32_t>(offset % std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4));
     const auto range = ViewBytes(bytes, adjustment);
     const auto end = region.direct != nullptr ? region.direct->base + region.direct->bytes : region.end;
-    Require(address - adjustment + range <= end, "guest buffer view exceeds its GPU owner");
+    if (address - adjustment + range > end) rejectBounds("aligned", end);
     Require(range <= context.limits.maxStorageBufferRange, "guest buffer view exceeds descriptor range limit");
     const auto handle = region.direct != nullptr ? region.direct->buffer : region.mirror != nullptr ? region.mirror->buffer->Handle() : region.buffer->Handle();
     return {handle, offset - adjustment, range};

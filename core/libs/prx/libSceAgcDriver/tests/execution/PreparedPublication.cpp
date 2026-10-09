@@ -185,6 +185,21 @@ void Registration(AgcDriver::VulkanDevice& device) {
     metadata->header.push_back(std::byte{1});
     PublishRegisteredShader(registry, metadata);
     Require(registry->at(0x10000) == metadata, "changed shader metadata was treated as identical");
+    // Identical code can have independent metadata owners. Preserve both for linking,
+    // but discard their aliases once the underlying code is replaced.
+    auto alias = makeSnapshot();
+    alias->code = metadata->code;
+    alias->headerAddress += 512;
+    alias->header.push_back(std::byte{2});
+    PublishRegisteredShader(registry, alias);
+    Require(registry->headers.at(metadata->headerAddress) == metadata && registry->headers.at(alias->headerAddress) == alias, "shared code lost an independent metadata header");
+    auto aliasSubmission = registry;
+    auto rewritten = makeSnapshot();
+    rewritten->code[0] ^= 2;
+    rewritten->header.push_back(std::byte{3});
+    PublishRegisteredShader(registry, rewritten);
+    Require(registry->headers.size() == 1 && registry->headers.at(rewritten->headerAddress) == rewritten, "changed code retained stale header aliases");
+    Require(aliasSubmission->headers.size() == 2, "code replacement modified in-flight header aliases");
 }
 
 }

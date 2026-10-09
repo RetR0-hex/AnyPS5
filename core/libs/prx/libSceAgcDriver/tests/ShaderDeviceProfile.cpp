@@ -142,11 +142,18 @@ void CheckHeaps() {
     Reject([&] { allocate(image, 1u, RuntimeAbi::SamplerHeapCapacity + 1u); }, "metadata capacity");
     image.resourceClass = ImageResourceClass::Storage;
     image.mipMode = ImageMipMode::DynamicStorage;
-    image.mipCount = RuntimeAbi::StorageHeapCapacity;
+    image.mipCount = RuntimeAbi::StorageMipCapacity;
     const auto storage = allocate(image, 1u);
     Require(BindingAllocator{}.FindBinding(storage.layout, DescriptorBindingForImage(image)).resources.size() == image.mipCount, "storage heap did not reserve each mip");
-    Reject([&] { allocate(image, 2u); }, "heap capacity exceeded");
-    Reject([&] { allocate(image, 0u, RuntimeAbi::SamplerHeapCapacity / 2u + 1u); }, "sampler pairs");
+    // Two dynamic images need independent mip ranges in the same typed binding.
+    const auto pair = allocate(image, 2u);
+    const auto& pairBinding = BindingAllocator{}.FindBinding(pair.layout, DescriptorBindingForImage(image));
+    Require(pairBinding.resources.size() == 2u * RuntimeAbi::StorageMipCapacity && pairBinding.resources.front() == 0u && pairBinding.resources.back() == 1u, "dynamic storage images did not retain distinct mip ranges");
+    Reject([&] { allocate(image, RuntimeAbi::StorageHeapCapacity / RuntimeAbi::StorageMipCapacity + 1u); }, "heap capacity exceeded");
+    // All guest sampler metadata slots must fit both host variants in the descriptor heap.
+    const auto samplers = allocate(image, 0u, RuntimeAbi::SamplerCapacity);
+    Require(BindingAllocator{}.FindBinding(samplers.layout, DescriptorBindingKind::Samplers).resources.size() == 2u * RuntimeAbi::SamplerCapacity, "sampler pairs reduced guest sampler capacity");
+    Reject([&] { allocate(image, 0u, RuntimeAbi::SamplerCapacity + 1u); }, "metadata capacity");
     const std::array dimensions{RdnaImageDimension::Dim1D, RdnaImageDimension::Dim1DArray, RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray, RdnaImageDimension::Dim3D, RdnaImageDimension::Dim2DMsaa, RdnaImageDimension::Dim2DMsaaArray};
     std::set<std::uint32_t> classes;
     for (std::uint32_t group = 0u; group < 8u; ++group) {

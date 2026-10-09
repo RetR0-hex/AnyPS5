@@ -268,6 +268,9 @@ bool ConstantFolder::tryFoldValue(IrProgram& program, IrValue& value) const {
         case IrOpcode::BitFieldUExtract:
         case IrOpcode::BitFieldSExtract: {
             auto& source = resolveArg(value, 0);
+            // The packed input is visited before arithmetic that computes extraction bounds.
+            // Retry lowering at the consumer once those bounds have become constants.
+            if (source.Opcode() == IrOpcode::GetBuiltin && lowerPackedAncillary(program, builder, source)) return true;
             auto& offset = resolveArg(value, 1);
             auto& count = resolveArg(value, 2);
             if (source.Opcode() == IrOpcode::ShiftLeftLogical32 && isImmediate(offset, IrType::U32) && isImmediate(count, IrType::U32)) {
@@ -646,12 +649,53 @@ bool ConstantFolder::tryFoldValue(IrProgram& program, IrValue& value) const {
     }
 }
 
+namespace {
+
+// The packed ancillary read that folding `inst` may lower: the read itself, or the source of a
+// bit-field extract (lowering is retried at the consumer once its bounds are constants).
+IrValue* packedAncillarySource(IrValue& inst) {
+    IrValue* source = &inst;
+    if (inst.Opcode() == IrOpcode::BitFieldUExtract || inst.Opcode() == IrOpcode::BitFieldSExtract) {
+        source = &resolveArg(inst, 0);
+    }
+    if (source->Opcode() != IrOpcode::GetBuiltin) return nullptr;
+    const auto& kind = resolveArg(*source, 0);
+    return isImmediate(kind, IrType::U32) && static_cast<StageInputKind>(kind.ImmediateU32()) == StageInputKind::PackedAncillary ? source : nullptr;
+}
+
+// After its sample-ID / render-target-index field reads have been lowered, a packed ancillary VGPR
+// often survives only as the register a wave preserves for inactive lanes: the false arm of an
+// EXEC-masked SelectU32, or a Phi carrying that register around. Such uses never feed the packed
+// bits into a lowered field, so the value is replaced by 0 rather than left for
+// ShaderInfoCollector to reject. This mirrors KytyPS5's ConstantPropagationPass; a Phi user is
+// accepted without following it further, the same as there. Any other raw use is kept, and still
+// fails info collection.
+void normalizeRetainedAncillary(IrBuilder& builder, IrValue& ancillary) {
+    std::vector<IrUse> uses;
+    collectUses(ancillary, uses);
+    const bool retainedOnly = std::ranges::all_of(uses, [](const IrUse& use) {
+        return use.user->IsPhi() || (use.user->Opcode() == IrOpcode::SelectU32 && use.operand == 2u);
+    });
+    if (!uses.empty() && retainedOnly) replaceWith(ancillary, builder.Constant(0u));
+}
+
+}
+
 void ConstantFolder::Fold(IrProgram& program, std::span<IrBlock* const> blocks) const {
+    std::vector<IrValue*> loweredAncillary;
     for (IrBlock* block : blocks) {
         for (IrValue* inst : block->Instructions()) {
+            IrValue* ancillary = packedAncillarySource(*inst);
             const auto success = tryFoldValue(program, *inst);
+            if (success && ancillary != nullptr && std::ranges::find(loweredAncillary, ancillary) == loweredAncillary.end()) {
+                loweredAncillary.push_back(ancillary);
+            }
         }
     }
+    // Only after every field read in these blocks has been lowered, so a field extract visited
+    // later cannot still need the packed value.
+    IrBuilder builder(program);
+    for (IrValue* ancillary : loweredAncillary) normalizeRetainedAncillary(builder, *ancillary);
 }
 
 void ConstantFolder::Fold(IrProgram& program) const {

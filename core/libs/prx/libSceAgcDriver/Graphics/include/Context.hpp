@@ -141,6 +141,8 @@ struct Context {
     bool imageInt64Atomics = false;
     bool geometryShader = false;
     bool sampleRateShading = false;
+    // VK_EXT_shader_viewport_index_layer: vertex shaders may write gl_Layer (layered color targets).
+    bool vertexLayer = false;
     // Needed by sample-preserving image2DMS transfers; ordinary buffer/image copies require 1x.
     bool shaderStorageImageMultisample = false;
     // Null descriptor support is negotiated by the active shader profile.

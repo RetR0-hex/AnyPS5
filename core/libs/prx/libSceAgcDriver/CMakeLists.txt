@@ -458,11 +458,27 @@ add_custom_command(
         VERBATIM
 )
 
+# Compile the depth-bit fixture through the same Vulkan target as the other GPU tests;
+# its UINT image instructions must run against an actual mutable R32 storage view.
+set(agcDepthStorageShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/DepthStorage.comp)
+set(agcDepthStorageShaderSpv ${agcTestShaderGeneratedRoot}/DepthStorage.spv)
+set(agcDepthStorageShaderHeader ${agcTestShaderGeneratedRoot}/DepthStorage_spv.h)
+add_custom_command(
+        OUTPUT "${agcDepthStorageShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTestShaderGeneratedRoot}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcDepthStorageShaderSpv}" "${agcDepthStorageShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcDepthStorageShaderSpv} -DOUTPUT=${agcDepthStorageShaderHeader}
+        -DSYMBOL=DEPTH_STORAGE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcDepthStorageShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 add_test_executable(agc_driver_recorder_tests EXCLUDE_FROM_ALL
         tests/Recorder.cpp
         tests/ResidentPresent.cpp
         ${agcSampleLodShaderHeader}
         ${agcSampleArrayShaderHeader}
+        ${agcDepthStorageShaderHeader}
 )
 
 target_include_directories(agc_driver_recorder_tests PRIVATE

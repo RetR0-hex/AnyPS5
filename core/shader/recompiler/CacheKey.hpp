@@ -177,6 +177,9 @@ private:
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
         append(key, value.targetOutputMode);
+        // Dual-source blending moves MRT1 to location 0 / Index 1, so it changes the SPIR-V
+        // interface. It comes from draw blend state, so the registry prepares it on first use.
+        append(key, value.dualSourceBlend);
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderVertexResourceDestination& value) {
@@ -190,6 +193,8 @@ private:
         append(key, value.fetchAttribReg);
         append(key, value.fetchBufferReg);
         append(key, value.fetchEmbedded);
+        // Clip routing specializes auxiliary EXP instructions, even when code bytes are identical.
+        append(key, value.paClVsOutCntl);
         if (value.resourcesNum > value.resources.size()) throw std::runtime_error("Shader cache: invalid vertex resource count");
         append(key, value.resourcesNum);
         for (std::uint32_t i = 0; i < value.resourcesNum; ++i) {

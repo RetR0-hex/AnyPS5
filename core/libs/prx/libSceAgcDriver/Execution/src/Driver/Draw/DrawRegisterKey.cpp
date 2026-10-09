@@ -57,6 +57,8 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
 }
 
 bool Driver::sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, const ShaderRecompiler::ShaderVertexStageInfo& b) {
+    // A cached vertex shader must preserve the clip-plane routing as well as its fetch layout.
+    if (a.paClVsOutCntl != b.paClVsOutCntl) return false;
     if (a.resourcesNum != b.resourcesNum || a.fetchAttribReg != b.fetchAttribReg || a.fetchBufferReg != b.fetchBufferReg || a.fetchEmbedded != b.fetchEmbedded) return false;
     for (std::uint32_t i = 0; i < a.resourcesNum && i < a.resources.size(); ++i) {
         if (a.resources[i].fields != b.resources[i].fields) return false;
@@ -68,6 +70,8 @@ bool Driver::sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, co
 }
 
 bool Driver::sameDecode(const DrawDecode& a, const DrawDecode& b) {
+    // The prepared vertex interface depends on context routing independently of shader bytes.
+    if (a.paClVsOutCntl != b.paClVsOutCntl) return false;
     const auto& s = a.state;
     const auto& t = b.state;
     const auto sameColor = [](const Graphics::ColorTarget& x, const Graphics::ColorTarget& y) {
@@ -96,9 +100,11 @@ bool Driver::sameDecode(const DrawDecode& a, const DrawDecode& b) {
     }
     if (s.hasColorTarget != t.hasColorTarget || s.rectList != t.rectList || s.renderExtent.width != t.renderExtent.width || s.renderExtent.height != t.renderExtent.height || s.topology != t.topology || s.negativeOneToOne != t.negativeOneToOne || s.depthClamp != t.depthClamp || s.conservativeRasterization != t.conservativeRasterization || s.cullMode != t.cullMode || s.frontFace != t.frontFace || !sameBlend(s.blend, t.blend) || s.blendConstants != t.blendConstants) return false;
     if (std::memcmp(&s.viewport, &t.viewport, sizeof(VkViewport)) != 0 || std::memcmp(&s.scissor, &t.scissor, sizeof(VkRect2D)) != 0) return false;
+    // Every pixel stage field that changes the recompiled shader, including the dual-source
+    // output layout, must match before a recorded draw is reused.
     const auto& p = a.pixel;
     const auto& q = b.pixel;
-    if (p.interpolatorCount != q.interpolatorCount || p.interpolatorSettings != q.interpolatorSettings || p.wave32 != q.wave32 || p.inputAddr != q.inputAddr || p.hasPerspectiveCenterVgpr != q.hasPerspectiveCenterVgpr || p.perspectiveCentroid != q.perspectiveCentroid || p.posX != q.posX || p.posY != q.posY || p.posZ != q.posZ || p.posW != q.posW || p.frontFace != q.frontFace || p.ancillary != q.ancillary || p.sampleShading != q.sampleShading || p.noPerspective != q.noPerspective || p.linearCentroid != q.linearCentroid || p.pixelKillEnable != q.pixelKillEnable || p.depthExportEnable != q.depthExportEnable || p.sampleMaskExportEnable != q.sampleMaskExportEnable || p.earlyZ != q.earlyZ || p.executeOnNoop != q.executeOnNoop || p.conservativeZExport != q.conservativeZExport || p.orderedPixelShader != q.orderedPixelShader || p.targetOutputMode != q.targetOutputMode || p.targetExportMapping != q.targetExportMapping) return false;
+    if (p.interpolatorCount != q.interpolatorCount || p.interpolatorSettings != q.interpolatorSettings || p.wave32 != q.wave32 || p.inputAddr != q.inputAddr || p.hasPerspectiveCenterVgpr != q.hasPerspectiveCenterVgpr || p.perspectiveCentroid != q.perspectiveCentroid || p.posX != q.posX || p.posY != q.posY || p.posZ != q.posZ || p.posW != q.posW || p.frontFace != q.frontFace || p.ancillary != q.ancillary || p.sampleShading != q.sampleShading || p.noPerspective != q.noPerspective || p.linearCentroid != q.linearCentroid || p.pixelKillEnable != q.pixelKillEnable || p.depthExportEnable != q.depthExportEnable || p.sampleMaskExportEnable != q.sampleMaskExportEnable || p.earlyZ != q.earlyZ || p.executeOnNoop != q.executeOnNoop || p.conservativeZExport != q.conservativeZExport || p.orderedPixelShader != q.orderedPixelShader || p.targetOutputMode != q.targetOutputMode || p.targetExportMapping != q.targetExportMapping || p.dualSourceBlend != q.dualSourceBlend) return false;
     if (a.roles != b.roles || a.programs.size() != b.programs.size()) return false;
     for (std::size_t i = 0; i < a.programs.size(); ++i) {
         const auto& x = a.programs[i];

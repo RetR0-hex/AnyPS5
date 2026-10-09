@@ -38,6 +38,15 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset, RegisterBan
     return it->second;
 }
 
+// Like read, for registers only a draw supplies: shader registration decodes pixel stage info from
+// the header's registers alone, which carry no CB blend state. The read is still noted, so draw
+// keys built from the read log cover the register when it is present.
+std::uint32_t readOr(const Registers& registers, std::uint32_t offset, RegisterBank bank, std::uint32_t fallback) {
+    NoteRegisterRead(bank, offset);
+    const auto it = registers.find(offset);
+    return it == registers.end() ? fallback : it->second;
+}
+
 template <typename T> T _readHeaderPod(std::span<const std::byte> header, std::uint64_t headerAddress, const void* pointer) {
     if (pointer == nullptr) throw std::runtime_error("AGC graphics: null AGC header pointer");
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
@@ -132,6 +141,20 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
     const auto zOrder = (shaderControl >> 4u) & 0x3u;
+    // CB_BLEND0_CONTROL: SRC1 factors (15-18) on an enabled, non-bypassed target 0 make MRT1 the
+    // second blend source instead of a target of its own (as KytyPS5's pipeline cache decides).
+    // The alpha factors only count when SEPARATE_ALPHA_BLEND (bit 29) selects them.
+    const bool dualSourceBlend = [&] {
+        if (nullProgram) return false;
+        // Absent blend state (registration) means no SRC1 factors; the draw supplies the real one.
+        const auto blend = readOr(context, 0x1e0u, RegisterBank::Context, 0u);
+        if ((blend & 0x40000000u) == 0) return false;
+        const bool bypass = (readOr(context, 0x31cu, RegisterBank::Context, 0u) & 0x10000u) != 0;
+        if (bypass) return false;
+        const auto src1 = [](std::uint32_t factor) { return factor >= 15u && factor <= 18u; };
+        const bool separateAlpha = (blend & 0x20000000u) != 0;
+        return src1(blend & 0x1fu) || src1((blend >> 8u) & 0x1fu) || (separateAlpha && (src1((blend >> 16u) & 0x1fu) || src1((blend >> 24u) & 0x1fu)));
+    }();
     const auto loaded = [&](PixelInput input) { return (activeInputs & PixelInputBit(input)) != 0; };
     return ShaderRecompiler::ShaderPixelStageInfo{
         .interpolatorCount = inputNum,
@@ -157,7 +180,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .conservativeZExport = static_cast<ShaderRecompiler::ConservativeZExport>(conservativeZExport),
         .orderedPixelShader = ((shaderControl >> 16u) & 0x1u) != 0,
         .targetOutputMode = targetOutputMode,
-        .targetExportMapping = exportMappings
+        .targetExportMapping = exportMappings,
+        .dualSourceBlend = dualSourceBlend
     };
 }
 

@@ -136,6 +136,9 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         if (program.binary.stage == Stage::Fragment || roles[i] == Role::GeometryBack) return;
         decodeReads[i].clear();
         vertexInfos[i] = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, &decodeReads[i]);
+        // Keep the misc-vector slot in the ordering while leaving its layer/viewport fields
+        // unrouted; removing bit21 would reinterpret the misc vector as clip distances.
+        vertexInfos[i]->paClVsOutCntl = queue.context.at(0x207) & (0xffu | (7u << 21u));
     };
     if (!registerKey) {
         for (std::size_t i = 0; i < programs.size(); ++i) decodeVertexInfo(i);
@@ -234,7 +237,8 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     const auto buildRectList = [&] {
         phaseTiming.Phase(DrawRowVectors);
         require(programs.size() == 2 && programResults[0] != nullptr && programResults[1] != nullptr, "rect-list requires vertex and fragment programs");
-        auto rectangle = PreparedRectangle(*programs[0].snapshot, programResults[0]->variantId, programResults[1]->variantId);
+        // SDK link calls can omit depth-only rectangle pairs; prepare from the active ABI.
+        auto rectangle = PreparedRectangle(*programs[0].snapshot, *programResults[0], *programResults[1], localDevice->Target());
         if (rectListBuilt) {
             results[rectIndex] = std::move(rectangle.control);
             results[rectIndex + 1] = std::move(rectangle.evaluation);

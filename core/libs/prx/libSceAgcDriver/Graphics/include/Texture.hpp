@@ -118,7 +118,9 @@ VkFormat AttachmentProxyFormat(const Context& context, VkFormat format);
 // or it leaves the cache. Dispatches reusing the image meanwhile skip the round trip entirely.
 class StorageTexture : public std::enable_shared_from_this<StorageTexture> {
 public:
-    StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel);
+    // initializeFromGuest=false is for an authoritative GPU source, such as native depth.
+    // The caller must fill every texel before use; the guest snapshot cannot validate this image.
+    StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel, bool initializeFromGuest = true);
     ~StorageTexture();
     StorageTexture(const StorageTexture&) = delete;
     StorageTexture& operator=(const StorageTexture&) = delete;
@@ -134,7 +136,8 @@ public:
     // Render targets live in the same images: draws attach mip 0 through a view of the color
     // buffer's format and mark the image dirty like a storage write.
     bool Attachable() const { return attachable; }
-    VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0, std::uint32_t depthSlice = 0);
+    // A sliceCount above 1 attaches that many 3D slices as one 2D-array view for layered draws.
+    VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0, std::uint32_t depthSlice = 0, std::uint32_t sliceCount = 1);
     VkImageView AttachmentProxyView();
     void RecordAttachmentProxyLoad(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
     void RecordAttachmentProxyStore(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
@@ -473,7 +476,8 @@ private:
     std::map<std::pair<std::uint32_t, bool>, VkImageView> atomicViews;
     std::map<std::pair<std::uint32_t, bool>, VkImageView> uintViews;
     bool attachable = false;
-    std::map<std::tuple<VkFormat, std::uint32_t, std::uint32_t>, VkImageView> attachmentViews;
+    // Keyed by format, mip, first slice and slice count.
+    std::map<std::tuple<VkFormat, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> attachmentViews;
     VkImage proxyImage = VK_NULL_HANDLE;
     VkDeviceMemory proxyMemory = VK_NULL_HANDLE;
     VkImageView proxyView = VK_NULL_HANDLE;
