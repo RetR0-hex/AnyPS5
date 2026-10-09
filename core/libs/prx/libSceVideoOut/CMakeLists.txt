@@ -16,7 +16,7 @@ target_include_directories(libSceVideoOut PRIVATE
         ${CMAKE_SOURCE_DIR}/3rdparty/SDL2/include
         ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
-target_link_libraries(libSceVideoOut PRIVATE libSceAgcDriver libScePad libSceMouse libSceKeyboard libc libkernel SDL2-static)
+target_link_libraries(libSceVideoOut PRIVATE libSceAgcDriver libScePad libSceMouse libSceKeyboard libc libkernel decoder_png SDL2-static)
 if(WIN32)
     target_link_libraries(libSceVideoOut PRIVATE comctl32)
 endif()
@@ -64,6 +64,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_video_out_vrr_peg PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_video_out_vrr_peg PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_video_out_resolution_status_tests ${LIBS_INCLUDE_DIR}/tests/GuestVideoOutResolutionStatus.cpp)
+    target_include_directories(guest_video_out_resolution_status_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_video_out_resolution_status_tests PRIVATE libSceVideoOut libSceAgcDriver libkernel libc)
+    configure_windows_unwind(guest_video_out_resolution_status_tests)
+    add_test(NAME guest_video_out_resolution_status COMMAND guest_video_out_resolution_status_tests)
+    set_tests_properties(guest_video_out_resolution_status PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_video_out_resolution_status PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()

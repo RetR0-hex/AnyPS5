@@ -61,6 +61,7 @@ struct ColorTarget {
     // surface). Above 1 the draw renders layered: the vertex stage's gl_Layer picks the slice.
     std::uint32_t sliceCount = 1;
     std::uint32_t exportIndex = 0;
+    bool uintExport = false;
 };
 
 struct DepthTarget {

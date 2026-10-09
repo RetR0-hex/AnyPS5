@@ -164,7 +164,7 @@ struct Module {
     }
 };
 
-Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool vertexLayer) {
+Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool vertexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -295,7 +295,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     isInterlockCapability ||
                     isFeatureCapability ||
                     isDescriptorIndexingCapability ||
-                    (imageInt64Atomics && (capability == spv::CapabilityInt64Atomics || capability == spv::CapabilityInt64ImageEXT)),
+                    ((imageInt64Atomics || bufferInt64Atomics) && capability == spv::CapabilityInt64Atomics) ||
+                    (imageInt64Atomics && capability == spv::CapabilityInt64ImageEXT),
                     std::string("SPIR-V requires unsupported device capability ") +
                         std::to_string(static_cast<std::uint32_t>(capability)));
 
@@ -579,7 +580,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
 
 }
 
-std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool vertexLayer) {
+std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool vertexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -595,7 +596,7 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
         Require(shaders[i].program != nullptr, "missing compiled shader");
         Require(shaders[i].stage == expected, "graphics stage order disagrees");
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == 0, "graphics resource uses a descriptor set other than zero");
-        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading, vertexLayer);
+        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading, bufferInt64Atomics, vertexLayer);
         if (i != 0) {
             for (const auto& [location, signature] : current.inputs) {
                 const auto output = previous.outputs.find(location);
@@ -614,14 +615,8 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
     for (const auto& [location, signature] : previous.outputs) {
         if (location >= attachments) continue;
         const auto color = std::find_if(state.colors.begin(), state.colors.end(), [&](const ColorTarget& target) { return target.exportIndex == location; });
-        // Vulkan attachment writes preserve integer lanes only when the shader's output type
-        // agrees with the attachment numeric class. Export locations may map to compacted MRTs.
-        const bool unsignedAttachment = color != state.colors.end() &&
-            (color->format == VK_FORMAT_R8_UINT || color->format == VK_FORMAT_R16_UINT ||
-             color->format == VK_FORMAT_R32_UINT || color->format == VK_FORMAT_R16G16_UINT ||
-             color->format == VK_FORMAT_R32G32_UINT || color->format == VK_FORMAT_R16G16B16A16_UINT ||
-             color->format == VK_FORMAT_R32G32B32A32_UINT);
-        Require(signature == (unsignedAttachment ? "vertex:u32x4" : "vertex:f32x4"), "fragment color output type disagrees with its attachment numeric class");
+        const bool uintExport = color != state.colors.end() && color->uintExport;
+        Require(signature == (uintExport ? "vertex:u32x4" : "vertex:f32x4"), uintExport ? "fragment shader must export uint4 colors to its unsigned integer attachments" : "fragment shader must export float4 colors to its attachments");
         locations.insert(location);
     }
     return locations;

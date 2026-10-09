@@ -69,11 +69,14 @@ int main() {
     Require(sceKernelGetModuleInfoFromAddr(reinterpret_cast<std::uint64_t>(&local), 2, &again) != 0);
     Require(sceKernelGetModuleInfoFromAddr(address, 2, nullptr) != 0);
 
-    // A valid frame pointer does not make an unsupported or oversized search table valid.
-    fixture->header.countEncoding = 0x0b;
+    // A valid frame pointer does not make an unsupported or oversized search table valid. The
+    // shared EhFrame reader decodes the count from the encoding's format nibble alone and takes
+    // every fixed width (sdata4 0x0b included), so the variable-length uleb128 (0x01) stands for the
+    // unsupported case.
+    fixture->header.countEncoding = 0x01;
     Require(ExtendedThrows(address));
     fixture->header.countEncoding = 0x03;
-    fixture->header.tableEncoding = 0x1b;
+    fixture->header.tableEncoding = 0x01; // uleb128 table entries have no fixed width
     Require(ExtendedThrows(address));
     fixture->header.tableEncoding = 0x3b;
     fixture->header.count = 0xffffffffu;

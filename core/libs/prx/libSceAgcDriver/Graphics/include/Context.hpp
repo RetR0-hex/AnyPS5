@@ -147,6 +147,7 @@ struct Context {
     bool shaderStorageImageMultisample = false;
     // Null descriptor support is negotiated by the active shader profile.
     bool nullDescriptors = false;
+    bool bufferInt64Atomics = false;
     bool primitiveListRestart = false;
     bool imageViewMinLod = false;
     bool pipelineExecutableInfo = false;
