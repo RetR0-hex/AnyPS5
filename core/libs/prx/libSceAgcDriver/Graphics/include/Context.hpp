@@ -108,6 +108,7 @@ struct Context {
     // Nonzero when VK_EXT_external_memory_host is enabled: the required host pointer alignment.
     VkDeviceSize hostImportAlignment = 0;
     bool dmaBufImport = false;
+    PFN_vkGetPhysicalDeviceMemoryProperties2 memoryProperties2 = nullptr;
     RenderCache* renderCache = nullptr;
     DrawQueue* drawQueue = nullptr;
     GraphicsPipelineCache* graphicsPipelines = nullptr;
@@ -142,6 +143,8 @@ struct Context {
     bool sampleRateShading = false;
     // Needed by sample-preserving image2DMS transfers; ordinary buffer/image copies require 1x.
     bool shaderStorageImageMultisample = false;
+    // Null descriptor support is negotiated by the active shader profile.
+    bool nullDescriptors = false;
     bool primitiveListRestart = false;
     bool imageViewMinLod = false;
     bool pipelineExecutableInfo = false;
