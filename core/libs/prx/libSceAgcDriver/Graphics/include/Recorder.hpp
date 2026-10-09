@@ -91,7 +91,12 @@ public:
     void BoundKeptBytes();
     std::size_t InFlightKeptBytes() const { return inFlightKeptBytes; }
     enum class SnapshotUse : std::uint8_t { Storage, Vertex, Index16, Index32 };
-    static constexpr std::size_t DrawSnapshotBudget = std::size_t{256} << 20u;
+    // Draw snapshots of read-only storage buffers are kept for reuse while the guest bytes stay
+    // unchanged (ReusableDrawSnapshot). The pool must hold the largest buffer a title binds:
+    // Exit 9 binds a 576 MiB upload heap, and at 256 MiB it was never kept, so every draw reading it
+    // copied all of it into a newly allocated host buffer (~96 GiB of memcpy in 70 s). Host-visible
+    // memory, so this bounds system RAM, not VRAM.
+    static constexpr std::size_t DrawSnapshotBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawSnapshotEntries = 1024;
     static constexpr std::size_t DrawInputBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawInputEntries = 16384;

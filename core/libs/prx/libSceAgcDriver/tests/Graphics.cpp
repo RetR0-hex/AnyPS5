@@ -2995,6 +2995,11 @@ void meshArgumentTests() {
     Require(same(ResolveMeshArguments(record(96 * 6, 600, 0), rules(triangles, 96 * 6)), {6, 600, 1, 96 * 6, 0}), "groups times instances at the device limit");
     Require(same(ResolveMeshArguments(record(0xffffffffu, 1, 0xfffffff0u), rules(points, 0xffffffffu)), {15, 1, 1, 15, 0xfffffff0u}), "first index near the end of a huge index buffer");
     Require(same(ResolveMeshArguments(record(0xffffffffu, 1, 0), rules(points, 0xffffffffu)), {0, 0, 0, 0xffffffffu, 0}), "groups over the device limit draw nothing");
+    // Auto (DRAW_INDIRECT) mesh draws: no index buffer bound, so the record's start vertex never
+    // clamps the count (it only rides along in firstIndex, which a non-indexed mesh shader ignores).
+    const auto autoRules = [&](const ShaderRecompiler::MeshConfiguration& mesh) { return rules(mesh, AgcDriver::Graphics::AutoDrawMeshBound); };
+    Require(same(ResolveMeshArguments(record(99, 2, 0), autoRules(triangles)), {2, 2, 1, 99, 0}), "an auto mesh draw takes the record's vertex count");
+    Require(same(ResolveMeshArguments(record(96, 1, 5000), autoRules(triangles)), {1, 1, 1, 96, 5000}), "an auto mesh draw's start vertex does not clamp its count");
 }
 
 void debugBranchTests() {

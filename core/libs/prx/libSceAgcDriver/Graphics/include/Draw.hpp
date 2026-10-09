@@ -47,6 +47,9 @@ struct MeshArgumentRules {
     std::uint32_t maxInstances;
     std::uint32_t maxTotal;
 };
+// `indexCount` is the bound the CP clamps firstIndex + count to (INDEX_BUFFER_SIZE) for an
+// indexed draw; an auto draw has no index buffer and passes AutoDrawMeshBound (no clamp).
+inline constexpr std::uint32_t AutoDrawMeshBound = 0xffffffffu;
 MeshArgumentRules MeshArgumentRulesFor(const Context& context, const ShaderRecompiler::MeshConfiguration& mesh, std::uint32_t indexCount);
 MeshArguments ResolveMeshArguments(const Pm4::DrawArguments& record, const MeshArgumentRules& rules);
 

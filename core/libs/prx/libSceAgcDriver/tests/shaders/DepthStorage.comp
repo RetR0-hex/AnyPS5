@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, r32ui) uniform uimage2D depthBits;
+layout(set = 0, binding = 1, std430) buffer Result { uint before; } result;
+layout(push_constant) uniform Parameters { uint replacement; } parameters;
+void main() {
+    // Depth float and uint views must share the same IEEE bits, with no numeric conversion.
+    // Observe one original pixel, then replace every pixel to exercise native depth copyback.
+    result.before = imageLoad(depthBits, ivec2(0)).r;
+    ivec2 extent = imageSize(depthBits);
+    for (int y = 0; y < extent.y; ++y)
+        for (int x = 0; x < extent.x; ++x)
+            imageStore(depthBits, ivec2(x, y), uvec4(parameters.replacement, 0, 0, 0));
+}

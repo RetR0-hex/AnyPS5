@@ -1630,7 +1630,18 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         // The clear is recorded into the open batch like a direct upload (the image kept by it): a
         // batch of its own submitted the recorder's work first and waited for all of it, 25-40 ms
         // under the GPU mutex at the movie stage. APS5_NO_RECORDED_CLEAR=1 waits as before.
-        captureGuestBytes(nullptr);
+        // `original` is what later refreshes compare guest memory against. In write-watched memory
+        // the write stamps already prove a surface unchanged, so the whole-surface read is skipped
+        // there (~3 ms for a 2848x1600 RGBA16F target, per clear, on every fast-cleared render
+        // target each frame) and the snapshot is marked invalid, as the direct upload below does.
+        // Untracked memory has no stamps: without the bytes a refresh could not prove the surface
+        // unchanged and would drop the image's pending results, so they are still captured.
+        if (GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
+            comparedGuestBytes = {};
+            originalValid = false;
+        } else {
+            captureGuestBytes(nullptr);
+        }
         forgetBorrowed(0, trackedLayers);
         stampLayers(false);
         static const bool recordClear = std::getenv("APS5_NO_RECORDED_CLEAR") == nullptr;
@@ -1784,16 +1795,42 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     stampLayers(false);
     GuestMemory::ReadCommitted(descriptor.baseAddress, original);
     {
-            Buffer staging(context, original.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-            if (uploadedKeys == DccKeys::Uncompressed) std::memcpy(staging.Bytes().data(), original.data(), original.size());
-            else ReadTextureSurface(descriptor, uploadedKeys, staging.Bytes().first(original.size()));
-            DeviceBuffer tiled(context, original.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-            DeviceBuffer linear(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            // The guest bytes are copied into `staging` here, so the GPU work below reads no guest
+            // memory. It is recorded into the open batch like the direct upload (the buffers and the
+            // image kept by it) instead of a batch of its own that the worker waited for: those
+            // waits were the largest stall of the queue worker in Exit 9's profile. Without an open
+            // recorder the batch is submitted and waited for as before.
+            auto staging = std::make_shared<Buffer>(context, original.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            if (uploadedKeys == DccKeys::Uncompressed) std::memcpy(staging->Bytes().data(), original.data(), original.size());
+            else ReadTextureSurface(descriptor, uploadedKeys, staging->Bytes().first(original.size()));
+            auto tiledBuffer = std::make_shared<DeviceBuffer>(context, original.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            auto linearBuffer = std::make_shared<DeviceBuffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            auto& tiled = *tiledBuffer;
+            auto& linear = *linearBuffer;
             detiler.BeginBatch();
-            CommandBatch batch(context);
-            const auto commands = batch.Handle();
+            auto* recorder = Recorder::Active();
+            std::unique_ptr<CommandBatch> batch;
+            VkCommandBuffer commands = VK_NULL_HANDLE;
+            auto timing = Recorder::NoTiming;
+            if (recorder != nullptr) {
+                commands = recorder->Commands();
+                timing = recorder->BeginGpuTiming(Recorder::CommandClass::StorageUpload);
+                recorder->Keep(staging, staging->Bytes().size());
+                recorder->Keep(tiledBuffer, tiledBuffer->Size());
+                recorder->Keep(linearBuffer, linearBuffer->Size());
+                // The image itself must outlive the recorded copy: the cache may evict it right after.
+                if (auto self = weak_from_this().lock()) recorder->Keep(std::move(self));
+                Recorder::CountBarriers(Recorder::CommandClass::StorageUpload, 4);
+                if (Recorder::BarrierValidate()) {
+                    const std::pair<VkImage, bool> written{image, true};
+                    recorder->NoteAccess(Recorder::CommandClass::StorageUpload, Recorder::Access{{}, {}, std::span(&written, 1), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT});
+                }
+            } else {
+                batch = std::make_unique<CommandBatch>(context);
+                commands = batch->Handle();
+            }
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-            CopyBuffer(context, commands, staging.Handle(), 0, tiled.Handle(), 0, original.size());
+            CopyBuffer(context, commands, staging->Handle(), 0, tiled.Handle(), 0, original.size());
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
                 for (std::uint32_t level = 0; level < mips.size(); ++level) {
@@ -1811,7 +1848,10 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
             toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransfer.image = image;
             toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, geometry.imageLayers};
-            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearRead, 1, &toTransfer);
+            // ALL_COMMANDS as the source also orders the copy after earlier work of the open batch
+            // that used this image (UNDEFINED discards its content, so no access needs to be made
+            // available), as on the direct path.
+            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearRead, 1, &toTransfer);
             const auto regions = CopyRegions();
             context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, linear.Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
             VkImageMemoryBarrier toGeneral = toTransfer;
@@ -1820,9 +1860,13 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
             toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
-            APS5_LOG_CHARS_OUT("StorageTexture upload submit");
-            batch.SubmitAndWait();
-            APS5_LOG_CHARS_OUT("StorageTexture upload done");
+            if (batch) {
+                APS5_LOG_CHARS_OUT("StorageTexture upload submit");
+                batch->SubmitAndWait();
+                APS5_LOG_CHARS_OUT("StorageTexture upload done");
+            } else {
+                recorder->EndGpuTiming(timing, guestBytes);
+            }
     }
     countStorageUpload(2, guestBytes);
     ++version;

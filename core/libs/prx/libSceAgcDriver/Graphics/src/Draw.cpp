@@ -807,7 +807,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         }
     }
     if (args == nullptr) Require(draw.indexCount != 0 && draw.instanceCount != 0, "zero-count indexed draws are unsupported");
-    else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation && !state.rectList, "indirect draw on a non-vertex path must be resolved by the driver");
+    // A mesh indirect draw, indexed or auto, reaches here only when the driver classified it
+    // GPU-side (single record, no SGPR locations): its counts are resolved by recordMeshArguments.
+    // Tessellation indirect draws are still read on the CPU by the driver.
+    else Require(!state.stages.tessellation, "indirect draw on a non-vertex path must be resolved by the driver");
     inputs.indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
     const auto indexBytes = inputs.indexBytes;
     APS5_LOG_OUT_DEBUG("Index buffer bytes=%llu", static_cast<unsigned long long>(indexBytes));
@@ -815,7 +818,9 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
     APS5_LOG_CHARS_OUT_DEBUG("Index buffer range OK");
     Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
-    if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
+    // A GPU-side indirect rect-list's count is only known on the GPU (indexCount is then the index
+    // buffer bound); there an incomplete trailing patch is dropped like the hardware's rectangle.
+    if (state.rectList && args == nullptr) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
     APS5_LOG_CHARS_OUT_DEBUG("ValidateShaders");
     if (recipe != nullptr) {
         inputs.fragmentOutputs = recipe->fragmentOutputs;
@@ -831,7 +836,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         Require(context.meshShader, "device does not support mesh shaders");
         const auto& mesh = *state.stages.mesh;
         const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
-        Require(draw.indexCount >= inputSize && mesh.primitivesPerGroup != 0, "mesh draw contains no complete primitive");
+        // An indirect draw's count lives in its record (an auto DRAW_INDIRECT has indexCount 0
+        // here, an indexed one the index buffer bound); MeshArguments.comp yields zero groups for
+        // an incomplete primitive, so only a direct draw's count is checked on the CPU.
+        Require((args != nullptr || draw.indexCount >= inputSize) && mesh.primitivesPerGroup != 0, "mesh draw contains no complete primitive");
         if (args == nullptr) {
             const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
             const auto primitives = (draw.indexCount - inputSize) / step + 1u;
@@ -1107,7 +1115,11 @@ bool recordIndirectArguments(const Context& context, VkCommandBuffer commands, R
 
 std::shared_ptr<Buffer> recordMeshArguments(const Context& context, VkCommandBuffer commands, Recorder* recorder, bool recorded, const State& state, const Pm4::DrawParameters& draw, const IndirectRecord& indirect, const std::function<void(std::uint32_t)>& countBarrier) {
     const auto* args = indirect.args;
-    const auto rules = MeshArgumentRulesFor(context, *state.stages.mesh, draw.indexCount);
+    // Indexed: clamp to the bound index buffer like the CP. Auto (DRAW_INDIRECT): no index buffer,
+    // so no clamp; the record's start (words[2]) lands in MeshArguments::firstIndex, which the mesh
+    // shader reads only to address indices (push word 3 = index size is 0 for an auto draw), so
+    // the ids stay draw(1) (vertexConstant) + i, as in the driver's CPU fallback.
+    const auto rules = MeshArgumentRulesFor(context, *state.stages.mesh, draw.indexed ? draw.indexCount : AutoDrawMeshBound);
     auto arguments = std::make_shared<Buffer>(context, ShaderRecompiler::MeshArgumentBytes, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     if (indirect.path == IndirectDrawPath::Gpu && recorder != nullptr && indirect.argumentImport->address != 0) {
         const std::array<std::uint32_t, 7> words{rules.indexCount, rules.inputSize, rules.step, rules.primitivesPerGroup, rules.maxGroups, rules.maxInstances, rules.maxTotal};

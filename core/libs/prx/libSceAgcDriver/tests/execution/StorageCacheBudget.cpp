@@ -155,7 +155,6 @@ int main() {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         const auto selected = SelectDevice();
-        const auto budget = AgcDriver::Graphics::TextureCacheBudget(selected.memory);
         std::vector<std::uint32_t> storage((SurfaceBytes + MaxSurfaces * Stride + Stride) / 4u, 0u);
         auto* texels = reinterpret_cast<std::uint32_t*>((reinterpret_cast<std::uintptr_t>(storage.data()) + Stride - 1u) & ~std::uintptr_t{Stride - 1u});
         for (std::uint32_t surface = 0; surface < MaxSurfaces; ++surface) texels[surface * Stride / 4u] = Marker(surface);
@@ -174,6 +173,10 @@ int main() {
             const auto first = Load(*device, base, 0);
             Require(first != nullptr, "surface 0 has no cached storage image");
             const auto held = std::max<std::uint64_t>(first->AllocationBytes(), first->GuestBytes());
+            // The cache sizes itself from the heap's reported budget when an image enters it, so
+            // the budget under test is the one it computed for the first surface.
+            const auto budget = AgcDriver::Graphics::StorageCacheBudget();
+            Require(budget != 0, "the storage cache computed no budget for its first image");
             const auto reused = static_cast<std::uint32_t>(FixedBudget / held) + 1u;
             std::printf("texture cache budget %llu MiB; each 4096x4096 32_UINT surface holds %llu MiB; cyclic set of %u surfaces (%llu MiB)\n", static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(held >> 20u), reused, static_cast<unsigned long long>((reused * held) >> 20u));
             if (budget < reused * held) {

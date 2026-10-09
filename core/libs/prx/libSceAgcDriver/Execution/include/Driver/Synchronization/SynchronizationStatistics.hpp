@@ -31,6 +31,10 @@ enum TrySite { TryLabel = 0, TryFlush, TryReap, TryPoll, TryIdle, TryCapture, Tr
 extern std::atomic<std::uint64_t> triesFailed[TrySites];
 
 extern std::atomic<std::uint64_t> storesOnGpu, storesBehindCompletions, storesOnCpu, storesDrained;
+// DMA_DATA memory-to-memory copies of at most 64 KiB recorded as a GPU transfer instead of being
+// resolved on the CPU (preparePacketMemory), and how many of those still waited inside CopyBuffer
+// for a batch whose completion stores on the CPU over the source or destination.
+extern std::atomic<std::uint64_t> dmaCopiesOnGpu, dmaCopiesSynced;
 
 extern std::map<std::uint32_t, std::uint64_t> drainCounts;
 

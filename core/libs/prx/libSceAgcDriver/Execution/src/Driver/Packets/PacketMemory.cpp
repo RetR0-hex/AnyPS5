@@ -100,7 +100,51 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
     if (!drainAll && !cpuStores && (opcode == 0x40 || opcode == 0x50 || opcode == 0x83)) {
         constexpr std::size_t gpuStoreLimit = 65536;
         bool drained = true;
-        if (const auto store = Pm4::ResolveStore(packet, queue, gpuStoreLimit)) {
+        // A small DMA_DATA memory-to-memory copy is otherwise resolved here on the CPU: ResolveStore
+        // reads the source through the checked path, so a source that recorded GPU work still
+        // writes makes the flush hook submit and wait for that batch (in Exit 9 the newest one,
+        // ~5 unsignaled batches, ~12 ms per packet: [hooksync] "0x0 DMA_DATA unknown"), and a copy
+        // whose destination or size is not a multiple of 4 is refused by the label store and
+        // drains the whole device below. The CP runs DMA_DATA asynchronously, so nothing on the
+        // CPU may observe the destination before the GPU reaches the packet; a transfer recorded
+        // in queue order (the >64 KiB path's CopyBuffer, which barriers after every earlier
+        // recorded write and notes the destination as a pending write, so a later CPU read of it
+        // still waits through the hook) gives exactly the hardware's ordering without the wait.
+        // The gate stays narrow: a settled, aligned source keeps the cheaper label store (no
+        // transfer, no barriers). Queued labels are recorded first so a label over the source is
+        // a pending write the transfer orders after. When CopyBuffer refuses (not imported:
+        // path 2), the packet falls through to the CPU resolve below, unchanged.
+        // APS5_NO_GPU_DMA_COPY=1 restores the CPU resolve for every small copy.
+        static const bool gpuDmaCopy = std::getenv("APS5_NO_GPU_DMA_COPY") == nullptr;
+        bool copiedOnGpu = false;
+        if (gpuDmaCopy && opcode == 0x50) {
+            const auto copy = Pm4::DecodeMemoryCopy(packet);
+            if (copy.has_value() && copy->bytes <= gpuStoreLimit && GuestMemory::Accessible(reinterpret_cast<const void*>(copy->source), copy->bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(copy->destination), copy->bytes, true)) {
+                const bool misaligned = copy->destination % 4 != 0 || copy->bytes % 4 != 0;
+                GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);
+                std::lock_guard gpuLock(GuestMemory::GpuMutex());
+                if (const auto localDevice = device.Load()) {
+                    recordDeferredLabels(localDevice.get(), submission.queue);
+                    // Read under the GPU mutex: the active recorder is only valid while it is held.
+                    const auto* recorder = Graphics::Recorder::Active();
+                    if (recorder != nullptr && (misaligned || recorder->PendingWriteOverlaps(copy->source, copy->bytes))) {
+                        // cpuMax 0: never the in-place memcpy (that is the label store's job); the
+                        // writer note is empty as on the >64 KiB path (no known destination value).
+                        const auto outcome = localDevice->CopyBuffer(copy->destination, copy->source, copy->bytes, 0, std::numeric_limits<std::size_t>::max(), 0, 0, submission.queue, [](std::span<const std::byte>, std::uint64_t) {});
+                        if (outcome.path == 1 || outcome.path == 3) {
+                            copiedOnGpu = true;
+                            wroteOnGpu = true;
+                            drained = false;
+                            ++dmaCopiesOnGpu;
+                            if (outcome.synced) ++dmaCopiesSynced;
+                        }
+                    }
+                }
+            }
+        }
+        if (copiedOnGpu) {
+            // Recorded above; neither the label store nor the drain applies.
+        } else if (const auto store = Pm4::ResolveStore(packet, queue, gpuStoreLimit)) {
             const auto bytes = store->Bytes();
             if (bytes.empty()) {
 

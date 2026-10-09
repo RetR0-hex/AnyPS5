@@ -27,6 +27,9 @@ class Recorder;
 void FlushCachedTextures(VkDevice device);
 void ClearCachedTextures(VkDevice device);
 std::uint64_t TextureCacheBudget(const VkPhysicalDeviceMemoryProperties& memory);
+// The storage image cache budget as last computed when an image entered the cache (it follows the
+// heap's VK_EXT_memory_budget; see storageBudget); 0 before the first insertion.
+std::uint64_t StorageCacheBudget();
 std::uint64_t SampledTextureBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, std::uint64_t textureBytes);
 bool SampledBudgetReportDue(std::uint64_t reported, std::uint64_t budget, std::chrono::steady_clock::duration sinceReport);
 struct TextureCacheUse {

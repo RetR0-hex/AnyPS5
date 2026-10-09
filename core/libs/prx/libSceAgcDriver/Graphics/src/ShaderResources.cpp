@@ -351,9 +351,45 @@ std::uint64_t forcedCacheBudget() {
     return forced;
 }
 
+// The storage image cache follows the heap's VK_EXT_memory_budget like the sampled cache: what
+// the driver grants the heap minus everything resident that is not this cache, less a 1/8 margin
+// (floor 2 GiB). The former fixed quarter of the heap (3 GiB on a 12 GiB card) sat just under
+// Exit 9's per-frame working set (~165 render/storage surfaces, ~3.3 GiB), so LRU eviction
+// discarded every image each frame; the recreated images piled up while batches still referenced
+// the evicted ones until device memory ran out. KytyPS5 likewise sizes its texture cache from the
+// reported budget. Reads are cached for a second; callers hold the storage cache mutex.
+std::atomic<std::uint64_t> lastStorageBudget{0};
+
+std::uint64_t storageBudgetUncached(const Context& context);
+
 std::uint64_t storageBudget(const Context& context) {
+    const auto budget = storageBudgetUncached(context);
+    lastStorageBudget.store(budget, std::memory_order_relaxed);
+    return budget;
+}
+
+std::uint64_t storageBudgetUncached(const Context& context) {
     const auto forced = forcedCacheBudget();
-    return forced != 0 ? forced : TextureCacheBudget(context.memory);
+    if (forced != 0) return forced;
+    const auto heap = largestDeviceLocalHeap(context.memory);
+    if (context.memoryProperties2 == nullptr || context.physical == VK_NULL_HANDLE || !heap) return TextureCacheBudget(context.memory);
+    static std::uint64_t cached = 0;
+    static std::chrono::steady_clock::time_point readAt{};
+    const auto now = std::chrono::steady_clock::now();
+    if (cached != 0 && now - readAt < std::chrono::seconds(1)) return cached;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &reported;
+    context.memoryProperties2(context.physical, &properties);
+    const auto budget = reported.heapBudget[*heap];
+    if (budget == 0) return TextureCacheBudget(context.memory);
+    const auto usage = reported.heapUsage[*heap];
+    const auto storage = storageCacheBytes();
+    const auto others = usage - std::min(usage, storage);
+    const auto reserved = others + budget / 8u;
+    cached = std::max<std::uint64_t>(2048ull << 20u, budget > reserved ? budget - reserved : 0u);
+    readAt = now;
+    return cached;
 }
 
 std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
@@ -372,7 +408,7 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
     if (const auto heap = largestDeviceLocalHeap(context.memory); heap && (fresh || SampledBudgetReportDue(cache.reportedBudget, budget, now - cache.reportedAt))) {
         char was[48] = "";
         if (!fresh) std::snprintf(was, sizeof(was), " (was %llu MiB)", static_cast<unsigned long long>(cache.reportedBudget >> 20u));
-        std::fprintf(stderr, "[gpu] sampled texture cache budget %llu MiB%s: device-local heap %u has a VK_EXT_memory_budget budget of %llu MiB and uses %llu MiB, %llu MiB of it sampled textures (%llu MiB in the cache) and %llu MiB cached storage images; storage image cache budget %llu MiB\n", static_cast<unsigned long long>(budget >> 20u), was, *heap, static_cast<unsigned long long>(reported.heapBudget[*heap] >> 20u), static_cast<unsigned long long>(reported.heapUsage[*heap] >> 20u), static_cast<unsigned long long>(sampled >> 20u), static_cast<unsigned long long>(cache.bytes >> 20u), static_cast<unsigned long long>(storage >> 20u), static_cast<unsigned long long>(TextureCacheBudget(context.memory) >> 20u));
+        std::fprintf(stderr, "[gpu] sampled texture cache budget %llu MiB%s: device-local heap %u has a VK_EXT_memory_budget budget of %llu MiB and uses %llu MiB, %llu MiB of it sampled textures (%llu MiB in the cache) and %llu MiB cached storage images; storage image cache budget %llu MiB\n", static_cast<unsigned long long>(budget >> 20u), was, *heap, static_cast<unsigned long long>(reported.heapBudget[*heap] >> 20u), static_cast<unsigned long long>(reported.heapUsage[*heap] >> 20u), static_cast<unsigned long long>(sampled >> 20u), static_cast<unsigned long long>(cache.bytes >> 20u), static_cast<unsigned long long>(storage >> 20u), static_cast<unsigned long long>(storageBudget(context) >> 20u));
         cache.reportedBudget = budget;
         cache.reportedAt = now;
     }
@@ -733,6 +769,10 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     return texture;
 }
 
+}
+
+std::uint64_t StorageCacheBudget() {
+    return lastStorageBudget.load(std::memory_order_relaxed);
 }
 
 std::uint64_t TextureCacheBudget(const VkPhysicalDeviceMemoryProperties& memory) {

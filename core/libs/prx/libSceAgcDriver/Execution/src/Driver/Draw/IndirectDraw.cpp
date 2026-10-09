@@ -21,8 +21,19 @@ std::optional<Graphics::IndirectDrawPath> Driver::classifyIndirectDraw(const Sha
     const auto fail = [&](Path reason) { if (!indirectCpu) indirectCpu = reason; };
     constexpr std::uint32_t NoLocation = 0x280u;
     const bool meshPath = graphics.stages.mesh.has_value() && !graphics.stages.tessellation && !graphics.rectList;
-    const bool meshGpuSide = meshPath && drawParameters.indexed && indirect.count == 1 && !indirect.countIndirect && indirect.baseVertexLocation == NoLocation && indirect.startInstanceLocation == NoLocation && (!indirect.drawIndexEnabled || indirect.drawIndexLocation == NoLocation);
-    if ((graphics.stages.path != Graphics::ShaderPath::Vertex || graphics.rectList) && !meshGpuSide) fail(Path::NonVertexPath);
+    // A single mesh-path record whose values the CP writes into no SGPR is turned into mesh task
+    // counts on the GPU (Graphics recordMeshArguments / MeshArguments.comp), indexed or auto: a
+    // DRAW_INDIRECT record {vertexCount, instanceCount, startVertex, startInstance} has its count,
+    // instances and start at the same dwords as DRAW_INDEX_INDIRECT's. With no base-vertex
+    // location the start vertex reaches no shader input (as in the CPU fallback, which draws from
+    // GE_INDX_OFFSET), so the auto draw's ids are vertexConstant + i (the Constant vertex rule
+    // below). A CPU read would instead wait for the GPU that wrote the record (~12 ms each in Exit 9).
+    const bool meshGpuSide = meshPath && indirect.count == 1 && !indirect.countIndirect && indirect.baseVertexLocation == NoLocation && indirect.startInstanceLocation == NoLocation && (!indirect.drawIndexEnabled || indirect.drawIndexLocation == NoLocation);
+    // A rect-list on the vertex path records the same indexed/auto indirect command: its helper
+    // tessellation stages only turn each 3-vertex patch into a rectangle, and Vulkan drops an
+    // incomplete trailing patch as the hardware drops an incomplete rectangle, so the arguments
+    // need no CPU read (Exit 9 issues hundreds of such full-screen passes per second).
+    if (graphics.stages.path != Graphics::ShaderPath::Vertex && !meshGpuSide) fail(Path::NonVertexPath);
     if (indirect.drawIndexEnabled && indirect.drawIndexSgpr >= 0) fail(Path::DrawIndex);
     if (indirect.countIndirect && !support.count) fail(Path::FeatureGap);
     if (indirect.countIndirect && indirect.count > 1 && !support.multi) fail(Path::FeatureGap);
@@ -52,7 +63,7 @@ std::optional<Graphics::IndirectDrawPath> Driver::classifyIndirectDraw(const Sha
         const auto location = [](std::uint32_t value, std::int32_t sgpr) { char text[24]; if (value == 0x280u) std::snprintf(text, sizeof(text), "none"); else std::snprintf(text, sizeof(text), "0x%x(s%d)", value, sgpr); return std::string(text); };
         const auto rule = [](Rule value, std::uint32_t constant) { char text[24]; if (value == Rule::InPlace) std::snprintf(text, sizeof(text), "in-place"); else std::snprintf(text, sizeof(text), "const %u", constant); return std::string(text); };
         std::string decision = indirectCpu ? "cpu (" + std::string(Graphics::IndirectDrawPathName(*indirectCpu)) + ")" : "gpu vertex=" + rule(indirect.vertexRule, indirect.vertexConstant) + " instance=" + rule(indirect.instanceRule, indirect.instanceConstant);
-        std::fprintf(stderr, "[draw] indirect 0x%x args 0x%llx stride %u count %u%s locs base=%s inst=%s idx=%s%s analyzer v=%d i=%d shared=%d/%d conflict=%d/%d indx=%u -> %s\n", indirect.opcode, static_cast<unsigned long long>(indirect.arguments), indirect.stride, indirect.count, indirect.countIndirect ? " (indirect)" : "", location(indirect.baseVertexLocation, indirect.baseVertexSgpr).c_str(), location(indirect.startInstanceLocation, indirect.startInstanceSgpr).c_str(), location(indirect.drawIndexLocation, indirect.drawIndexSgpr).c_str(), indirect.drawIndexEnabled ? " (enabled)" : "", result.vertexOffsetSgpr, result.instanceOffsetSgpr, result.vertexOffsetShared ? 1 : 0, result.instanceOffsetShared ? 1 : 0, result.vertexOffsetConflict ? 1 : 0, result.instanceOffsetConflict ? 1 : 0, indirect.indxOffset, decision.c_str());
+        std::fprintf(stderr, "[draw] indirect 0x%x args 0x%llx stride %u count %u%s locs base=%s inst=%s idx=%s%s analyzer v=%d i=%d shared=%d/%d conflict=%d/%d indx=%u path=%d mesh=%d tess=%d rect=%d -> %s\n", indirect.opcode, static_cast<unsigned long long>(indirect.arguments), indirect.stride, indirect.count, indirect.countIndirect ? " (indirect)" : "", location(indirect.baseVertexLocation, indirect.baseVertexSgpr).c_str(), location(indirect.startInstanceLocation, indirect.startInstanceSgpr).c_str(), location(indirect.drawIndexLocation, indirect.drawIndexSgpr).c_str(), indirect.drawIndexEnabled ? " (enabled)" : "", result.vertexOffsetSgpr, result.instanceOffsetSgpr, result.vertexOffsetShared ? 1 : 0, result.instanceOffsetShared ? 1 : 0, result.vertexOffsetConflict ? 1 : 0, result.instanceOffsetConflict ? 1 : 0, indirect.indxOffset, static_cast<int>(graphics.stages.path), graphics.stages.mesh.has_value() ? 1 : 0, graphics.stages.tessellation.has_value() ? 1 : 0, graphics.rectList ? 1 : 0, decision.c_str());
     }
     return indirectCpu;
 }
