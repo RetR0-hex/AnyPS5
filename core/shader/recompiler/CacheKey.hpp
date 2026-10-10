@@ -177,9 +177,6 @@ private:
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
         append(key, value.targetOutputMode);
-        // Dual-source blending moves MRT1 to location 0 / Index 1, so it changes the SPIR-V
-        // interface. It comes from draw blend state, so the registry prepares it on first use.
-        append(key, value.dualSourceBlend);
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderVertexResourceDestination& value) {

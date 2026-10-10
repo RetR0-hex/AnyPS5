@@ -9,7 +9,7 @@
 
 namespace ShaderRecompiler::RuntimeAbi {
 
-inline constexpr std::uint32_t Version = 10u;
+inline constexpr std::uint32_t Version = 11u;
 inline constexpr std::uint32_t DescriptorSet = 0u;
 inline constexpr std::uint32_t StageCount = 4u;
 inline constexpr std::uint32_t PushConstantDwords = 32u;
@@ -34,13 +34,11 @@ enum class Stage : std::uint32_t { Main, Fragment, TessellationControl, Tessella
 inline constexpr std::uint32_t UserDataCapacity = 128u;
 inline constexpr std::uint32_t BufferCapacity = 128u;
 inline constexpr std::uint32_t ImageCapacity = 256u;
-inline constexpr std::uint32_t SampledHeapCapacity = 16u;
-// Mip views belong to each image; the typed binding must hold multiple image ranges.
-inline constexpr std::uint32_t StorageMipCapacity = 4u;
+inline constexpr std::uint32_t SampledHeapCapacity = 64u;
+inline constexpr std::uint32_t BindlessTableSlots = 16u;
+inline constexpr std::uint32_t StorageMipSlots = 4u;
 inline constexpr std::uint32_t StorageHeapCapacity = 16u;
-// Each guest sampler has normal and comparison variants in the host descriptor heap.
-inline constexpr std::uint32_t SamplerCapacity = 16u;
-inline constexpr std::uint32_t SamplerHeapCapacity = 2u * SamplerCapacity;
+inline constexpr std::uint32_t SamplerHeapCapacity = 32u;
 
 struct ResourceMetadata {
     std::uint32_t binding;
@@ -59,7 +57,7 @@ struct ShaderData {
     std::array<std::uint32_t, BufferCapacity / 4u> bufferOffsets;
     std::array<std::uint32_t, 4> dispatchThreadLimit;
     std::array<ResourceMetadata, ImageCapacity> images;
-    std::array<ResourceMetadata, SamplerCapacity> samplers;
+    std::array<ResourceMetadata, SamplerHeapCapacity> samplers;
     std::array<std::uint32_t, 8> exportMappings;
 };
 
@@ -78,9 +76,9 @@ inline std::uint32_t HeapCapacity(Binding binding) {
 }
 
 static_assert(std::is_standard_layout_v<ResourceMetadata> && std::is_trivially_copyable_v<ResourceMetadata> && sizeof(ResourceMetadata) == 48u);
-static_assert(std::is_standard_layout_v<ShaderData> && std::is_trivially_copyable_v<ShaderData> && sizeof(ShaderData) == 13760u);
+static_assert(std::is_standard_layout_v<ShaderData> && std::is_trivially_copyable_v<ShaderData> && sizeof(ShaderData) == 14528u);
 static_assert(UserDataDword == 4u && BufferOffsetsDword == 132u && DispatchThreadLimitDword == 164u);
-static_assert(ExportMappingsDword == 3432u);
+static_assert(ExportMappingsDword == 3624u);
 static_assert(offsetof(ResourceMetadata, descriptor) == 16u && offsetof(ShaderData, images) == 672u && offsetof(ShaderData, samplers) == 12960u);
 
 inline void RequireVersion(std::uint32_t version) {

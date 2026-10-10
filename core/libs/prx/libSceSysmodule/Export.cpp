@@ -18,6 +18,8 @@
 
 namespace {
 
+constexpr int SCE_SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805A1001);
+
 const char* findModuleName(const std::uint32_t id) {
     const auto it = kModuleTable.find(id);
     return it != kModuleTable.end() ? it->second : nullptr;
@@ -103,7 +105,7 @@ int APS5_VABI sceSysmoduleIsLoaded(std::uint16_t id) {
     std::lock_guard<std::mutex> lock(gMutex);
     auto it = gLoadCount.find(id);
     if (it == gLoadCount.end() || it->second < 1) {
-        return 0x80A90002;
+        return SCE_SYSMODULE_ERROR_UNLOADED;
     }
     return 0;
 }
@@ -151,7 +153,7 @@ int APS5_VABI sceSysmoduleUnloadModule(std::uint16_t id) {
     std::lock_guard<std::mutex> lock(gMutex);
     auto it = gLoadCount.find(id);
     if (it == gLoadCount.end() || it->second < 1) {
-        return 0x80A90003;
+        return SCE_SYSMODULE_ERROR_UNLOADED;
     }
     it->second--;
     return 0;
@@ -179,7 +181,7 @@ int APS5_VABI sceSysmoduleUnloadModuleInternal(std::uint32_t id) {
     std::lock_guard<std::mutex> lock(gMutex);
     auto it = gLoadCount.find(id);
     if (it == gLoadCount.end() || it->second < 1) {
-        return 0x80A90003;
+        return SCE_SYSMODULE_ERROR_UNLOADED;
     }
     it->second--;
     return 0;

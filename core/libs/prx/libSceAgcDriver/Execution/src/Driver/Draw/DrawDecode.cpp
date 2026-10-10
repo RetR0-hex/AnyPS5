@@ -36,9 +36,7 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
         require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "graphics program is outside registered shader code");
         require((address - snapshot.codeAddress) % sizeof(std::uint32_t) == 0, "graphics entry point is not dword aligned");
         require(snapshot.type == type, "graphics program refers to an incompatible shader binary type");
-        Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
-        // Depth/stencil-only passes can retain a real pixel shader's user SGPR count.
-        // The synthetic pixel program has no user data, regardless of those stale registers.
+        if (!nullPixel) Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
         const auto resources = nullPixel ? 0u : ReadGraphicsRegister(queue.shader, rsrc2);
         const auto userCount = ((resources >> 1u) & 0x1fu) | (((resources >> 27u) & 1u) << 5u);
         require(userCount <= 32, "graphics user SGPR count exceeds the register bank");
@@ -119,6 +117,8 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->state = Graphics::DecodeState(queue);
     DecodeGraphicsPrograms(*product, queue, *submission.shaders, false, true);
     product->pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product->state), Graphics::PixelProgramSkipped(queue));
+    product->pixel.targetExportPacking = Graphics::ExportPackings(product->state);
+    product->pixel.dualSourceBlend = product->state.dualSourceBlend;
     return product;
 }
 

@@ -29,7 +29,7 @@ int main() {
             const auto allocate = [&](std::size_t bytes) {
                 allocations.bytes.emplace_back(bytes + 65536, std::byte{0x5a});
                 const auto base = (reinterpret_cast<std::uintptr_t>(allocations.bytes.back().data()) + 65535u) & ~std::uintptr_t{65535u};
-                GuestAllocations::Mutation().Add(reinterpret_cast<void*>(base), bytes, true, true);
+                GuestAllocations::Mutation().Add(reinterpret_cast<void*>(base), bytes, true, true, true);
                 allocations.registered.push_back(reinterpret_cast<void*>(base));
                 return std::span(reinterpret_cast<std::byte*>(base), bytes);
             };

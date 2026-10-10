@@ -32,8 +32,6 @@ int main() {
     std::memcpy(static_cast<void*>(packed), &shader, sizeof(Shader));
     Require(Registers(packed));
 
-    // A header that is not even 4-byte aligned is still refused.
-    auto* broken = reinterpret_cast<Shader*>(storage + 2);
-    std::memmove(static_cast<void*>(broken), &shader, sizeof(Shader));
-    Require(!Registers(broken));
+    // Upstream reads the fixed header fields byte-wise, so it no longer requires any header
+    // alignment; this test only guards the 4-byte case titles actually use.
 }

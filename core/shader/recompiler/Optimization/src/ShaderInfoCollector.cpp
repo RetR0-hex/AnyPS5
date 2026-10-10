@@ -130,19 +130,16 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                     const auto component = componentValue->ImmediateU32();
                     switch (kind) {
                         case StageInputKind::PackedAncillary: {
-                            // ConstantFolder lowers only bit-field extracts of the sample-ID and
-                            // render-target-index fields. Name the remaining consumers (with their
-                            // immediate operands) so the next pattern to lower is visible in logs.
-                            std::string users;
-                            for (const auto& use : inst->OperandUses()) {
-                                users += users.empty() ? "" : ", ";
-                                users += std::string(IrOpcodeName(use.user->Opcode()));
-                                for (std::size_t operand = 0; operand < use.user->ArgumentCount(); ++operand) {
-                                    const IrValue* argument = use.user->Argument(operand)->Resolve();
-                                    if (argument->HasImmediate() && argument->Type() == IrType::U32) users += " #" + std::to_string(argument->ImmediateU32());
+                            std::string uses;
+                            for (const IrValue* user : inst->Uses()) {
+                                uses += uses.empty() ? " (used by " : ", ";
+                                uses += IrOpcodeName(user->Opcode());
+                                for (std::size_t i = 1; i < user->ArgumentCount(); ++i) {
+                                    const IrValue* argument = user->Argument(i)->Resolve();
+                                    uses += argument->HasImmediate() && argument->Type() == IrType::U32 ? " " + std::to_string(argument->ImmediateU32()) : " ?";
                                 }
                             }
-                            return Fail("packed pixel ancillary input has an unsupported live use (used by: " + users + ")");
+                            return Fail("packed pixel ancillary input has an unsupported live use" + uses + (uses.empty() ? "" : ")"));
                         }
                         case StageInputKind::Layer:
                         case StageInputKind::SampleId:
@@ -450,16 +447,9 @@ void CollectOutputs(const IrProgram& program, ShaderStageInputInfo inputInfo, Sh
                 case ExportTargetKind::Parameter:
                     AddOutput(info, StageOutputKind::Parameter, exportInfo.index, exportInfo.index, "out_param_" + std::to_string(exportInfo.index));
                     break;
-                case ExportTargetKind::Mrt: {
-                    // Under dual-source blending MRT1 is the second blend source of target 0, so
-                    // both exports share location 0; the emitter tells them apart by Index.
-                    const bool dualSource = inputInfo.pixel != nullptr && inputInfo.pixel->psDualSourceBlend;
-                    if (dualSource && exportInfo.index > 1u) {
-                        return Fail("dual-source blending pixel shader exports MRT" + std::to_string(exportInfo.index));
-                    }
-                    AddOutput(info, StageOutputKind::Mrt, exportInfo.index, dualSource ? 0u : exportInfo.index, "out_mrt_" + std::to_string(exportInfo.index));
+                case ExportTargetKind::Mrt:
+                    AddOutput(info, StageOutputKind::Mrt, exportInfo.index, exportInfo.index, "out_mrt_" + std::to_string(exportInfo.index));
                     break;
-                }
                 default:
                     break;
             }

@@ -34,12 +34,7 @@ std::optional<DrawVerdict> Driver::precheckDraw(const QueueState& queue, const S
         const bool colorWrites = targetMask != queue.context.end() && shaderMask != queue.context.end() && Graphics::ColorWriteMask(queue.context) != 0;
         if (!colorWrites && !queue.shader.contains(0x8)) {
             const auto word = [&](std::uint32_t offset) { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };
-            const bool stencilClear = (word(0x000) & 2u) != 0 && (word(0x011) & 1u) != 0;
-            if (!stencilClear) {
-                if ((word(0x200) & 3u) == 0 || ((word(0x010) & 3u) == 0 && (word(0x011) & 1u) == 0)) return DrawVerdict::Nothing;
-                rejected = "AGC graphics: depth/stencil-only draws without a pixel shader are not implemented";
-                return DrawVerdict::Rejected;
-            }
+            if ((word(0x200) & 3u) == 0 || ((word(0x010) & 3u) == 0 && (word(0x011) & 1u) == 0)) return DrawVerdict::Nothing;
         }
     }
     if (drawParameters.indexed) {

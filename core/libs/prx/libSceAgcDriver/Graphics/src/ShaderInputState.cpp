@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,23 +39,14 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset, RegisterBan
     return it->second;
 }
 
-// Like read, for registers only a draw supplies: shader registration decodes pixel stage info from
-// the header's registers alone, which carry no CB blend state. The read is still noted, so draw
-// keys built from the read log cover the register when it is present.
-std::uint32_t readOr(const Registers& registers, std::uint32_t offset, RegisterBank bank, std::uint32_t fallback) {
-    NoteRegisterRead(bank, offset);
-    const auto it = registers.find(offset);
-    return it == registers.end() ? fallback : it->second;
-}
-
-template <typename T> T _readHeaderPod(std::span<const std::byte> header, std::uint64_t headerAddress, const void* pointer) {
+template <typename T> T _readHeaderPod(std::span<const std::byte> header, std::uint64_t headerAddress, const void* pointer, std::size_t bytes = sizeof(T)) {
     if (pointer == nullptr) throw std::runtime_error("AGC graphics: null AGC header pointer");
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
     if (address < headerAddress) throw std::runtime_error("AGC graphics: AGC header pointer precedes the shader header");
     const auto offset = address - headerAddress;
-    if (offset + sizeof(T) > header.size()) throw std::runtime_error("AGC graphics: AGC header pointer is outside the registered shader header");
-    T value;
-    std::memcpy(&value, header.data() + offset, sizeof(T));
+    if (offset > header.size() || bytes > header.size() - offset) throw std::runtime_error("AGC graphics: AGC header pointer is outside the registered shader header");
+    T value{};
+    std::memcpy(&value, header.data() + offset, bytes);
     return value;
 }
 
@@ -115,7 +107,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     constexpr std::uint32_t knownMask = PixelInputBit(PixelInput::PerspectiveSample) | PixelInputBit(PixelInput::PerspectiveCenter) | PixelInputBit(PixelInput::PerspectiveCentroid) |
         PixelInputBit(PixelInput::LinearSample) | PixelInputBit(PixelInput::LinearCenter) | PixelInputBit(PixelInput::LinearCentroid) |
         PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY) | PixelInputBit(PixelInput::PositionZ) | PixelInputBit(PixelInput::PositionW) |
-        PixelInputBit(PixelInput::FrontFace) | PixelInputBit(PixelInput::Ancillary);
+        PixelInputBit(PixelInput::FrontFace) | PixelInputBit(PixelInput::Ancillary) | PixelInputBit(PixelInput::LineStipple) | PixelInputBit(PixelInput::PositionFixedPoint);
     if ((activeInputs & ~knownMask) != 0) {
         char message[128];
         std::snprintf(message, sizeof(message), "AGC graphics: unsupported SPI_PS_INPUT_ENA/ADDR bit combination (ena 0x%x addr 0x%x)", ena, addr);
@@ -141,20 +133,6 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
     const auto zOrder = (shaderControl >> 4u) & 0x3u;
-    // CB_BLEND0_CONTROL: SRC1 factors (15-18) on an enabled, non-bypassed target 0 make MRT1 the
-    // second blend source instead of a target of its own (as KytyPS5's pipeline cache decides).
-    // The alpha factors only count when SEPARATE_ALPHA_BLEND (bit 29) selects them.
-    const bool dualSourceBlend = [&] {
-        if (nullProgram) return false;
-        // Absent blend state (registration) means no SRC1 factors; the draw supplies the real one.
-        const auto blend = readOr(context, 0x1e0u, RegisterBank::Context, 0u);
-        if ((blend & 0x40000000u) == 0) return false;
-        const bool bypass = (readOr(context, 0x31cu, RegisterBank::Context, 0u) & 0x10000u) != 0;
-        if (bypass) return false;
-        const auto src1 = [](std::uint32_t factor) { return factor >= 15u && factor <= 18u; };
-        const bool separateAlpha = (blend & 0x20000000u) != 0;
-        return src1(blend & 0x1fu) || src1((blend >> 8u) & 0x1fu) || (separateAlpha && (src1((blend >> 16u) & 0x1fu) || src1((blend >> 24u) & 0x1fu)));
-    }();
     const auto loaded = [&](PixelInput input) { return (activeInputs & PixelInputBit(input)) != 0; };
     return ShaderRecompiler::ShaderPixelStageInfo{
         .interpolatorCount = inputNum,
@@ -180,8 +158,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .conservativeZExport = static_cast<ShaderRecompiler::ConservativeZExport>(conservativeZExport),
         .orderedPixelShader = ((shaderControl >> 16u) & 0x1u) != 0,
         .targetOutputMode = targetOutputMode,
-        .targetExportMapping = exportMappings,
-        .dualSourceBlend = dualSourceBlend
+        .targetExportMapping = nullProgram ? std::array<std::uint8_t, 8>{} : exportMappings
     };
 }
 
@@ -191,7 +168,8 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
     std::memcpy(&shader, header.data(), sizeof(Shader));
     ShaderRecompiler::ShaderVertexStageInfo info{};
     if (shader.user_data == nullptr) throw std::runtime_error("AGC graphics: missing AGC user-data header");
-    const auto userDataHeader = _readHeaderPod<ShaderUserData>(header, headerAddress, shader.user_data);
+    constexpr auto userDataBytes = offsetof(ShaderUserData, sharp_resource_count) + sizeof(ShaderUserData{}.sharp_resource_count);
+    const auto userDataHeader = _readHeaderPod<ShaderUserData>(header, headerAddress, shader.user_data, userDataBytes);
     if (userDataHeader.direct_resource_count > ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT) throw std::runtime_error("AGC graphics: AGC direct-resource count exceeds the known resource domain");
     std::array<std::uint16_t, ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT> directOffsets{};
     directOffsets.fill(ShaderRegs::AGC_ILLEGAL_DIRECT_OFFSET);

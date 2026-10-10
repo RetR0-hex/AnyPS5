@@ -5,7 +5,7 @@
 
 namespace AgcDriver::DriverDetail {
 
-std::atomic<std::uint64_t> gpuLabels{0}, completionLabels{0}, notImportedLabels{0}, noOpLabels{0}, unlockedDrains{0};
+std::atomic<std::uint64_t> gpuLabels{0}, completionLabels{0}, noOpLabels{0}, unlockedDrains{0};
 
 std::atomic<std::uint64_t> labelFallbacks[5] = {};
 
@@ -41,7 +41,7 @@ SubmissionCosts& submissionCosts(std::uint32_t queue) {
 void reportSync() {
     std::string report;
     for (const auto& [code, count] : drainCounts) report += " " + (code == 0xffffu ? std::string("flip") : Pm4::Name(code << 8u)) + "=" + std::to_string(count);
-    AgcDriver::ProfilePrint_nid_no_patch("[sync] %llu device drains by packet:%s (%llu waited without the GPU mutex); %llu labels written on the GPU, %llu deferred behind completions, %llu deferred not imported, %llu no-op, fallbacks: idle %llu, completions %llu, not imported %llu, undecodable %llu; %llu labels queued per worker, recorded in %llu groups, %llu recorded at once; stores: %llu recorded on the GPU, %llu behind completions, %llu on the CPU (idle), %llu synced (drained)\n", static_cast<unsigned long long>(drainTotal), report.c_str(), static_cast<unsigned long long>(unlockedDrains.load()), static_cast<unsigned long long>(gpuLabels.load()), static_cast<unsigned long long>(completionLabels.load()), static_cast<unsigned long long>(notImportedLabels.load()), static_cast<unsigned long long>(noOpLabels.load()), static_cast<unsigned long long>(labelFallbacks[1].load()), static_cast<unsigned long long>(labelFallbacks[2].load()), static_cast<unsigned long long>(labelFallbacks[3].load()), static_cast<unsigned long long>(labelFallbacks[4].load()), static_cast<unsigned long long>(queuedLabels.load()), static_cast<unsigned long long>(labelGroups.load()), static_cast<unsigned long long>(immediateLabels.load()), static_cast<unsigned long long>(storesOnGpu.load()), static_cast<unsigned long long>(storesBehindCompletions.load()), static_cast<unsigned long long>(storesOnCpu.load()), static_cast<unsigned long long>(storesDrained.load()));
+    AgcDriver::ProfilePrint_nid_no_patch("[sync] %llu device drains by packet:%s (%llu waited without the GPU mutex); %llu labels written on the GPU, %llu deferred behind completions, %llu no-op, fallbacks: idle %llu, completions %llu, not imported %llu, undecodable %llu; %llu labels queued per worker, recorded in %llu groups, %llu recorded at once; stores: %llu recorded on the GPU, %llu behind completions, %llu on the CPU (idle), %llu synced (drained)\n", static_cast<unsigned long long>(drainTotal), report.c_str(), static_cast<unsigned long long>(unlockedDrains.load()), static_cast<unsigned long long>(gpuLabels.load()), static_cast<unsigned long long>(completionLabels.load()), static_cast<unsigned long long>(noOpLabels.load()), static_cast<unsigned long long>(labelFallbacks[1].load()), static_cast<unsigned long long>(labelFallbacks[2].load()), static_cast<unsigned long long>(labelFallbacks[3].load()), static_cast<unsigned long long>(labelFallbacks[4].load()), static_cast<unsigned long long>(queuedLabels.load()), static_cast<unsigned long long>(labelGroups.load()), static_cast<unsigned long long>(immediateLabels.load()), static_cast<unsigned long long>(storesOnGpu.load()), static_cast<unsigned long long>(storesBehindCompletions.load()), static_cast<unsigned long long>(storesOnCpu.load()), static_cast<unsigned long long>(storesDrained.load()));
     // Cumulative, like the store counts above: compare against "synced (drained)" and the
     // [hooksync] DMA_DATA row to see the CPU resolves this path replaced.
     AgcDriver::ProfilePrint_nid_no_patch("[sync] DMA_DATA copies recorded on the GPU: %llu (%llu waited for a completion store first)\n", static_cast<unsigned long long>(dmaCopiesOnGpu.load()), static_cast<unsigned long long>(dmaCopiesSynced.load()));
@@ -50,7 +50,6 @@ void reportSync() {
 void countLabelOutcome(int reason) {
     if (reason == 0) ++gpuLabels;
     else if (reason == 5) ++completionLabels;
-    else if (reason == 6) ++notImportedLabels;
     else ++labelFallbacks[std::min(reason, 4)];
 }
 
